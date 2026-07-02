@@ -1,0 +1,17 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+backend/.env
+
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+*.log
+
+# Misc
+.DS_Store
+
+# TS build info
+frontend/*.tsbuildinfo
