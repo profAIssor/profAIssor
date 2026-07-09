@@ -95,3 +95,7 @@ curl -X POST localhost:8000/api/report -H 'content-type: application/json' \
 - 실시간 STT/TTS 음성 (Web Speech API)
 - 로그인/DB/세션 히스토리 — 상태는 메모리(React state)로만
 - BGE-M3 의미유사도 기반 슬라이드 커버리지
+
+## 본선 구현 로드맵
+
+본선(최종 제출)을 위한 단계별 구현 계획은 [`PLAN.md`](./PLAN.md) 참고.
