@@ -13,10 +13,23 @@ def _format_slides(slides: List[Slide]) -> str:
     return "\n".join(f"[슬라이드 {s.index}] {s.text}" for s in slides)
 
 
+_DIFFICULTY_HINTS = {
+    "easy": "질문 난이도는 '쉬움'입니다. 단순 확인형 질문 하나만 던지세요 "
+            "(예: 방금 말한 용어나 수치를 다시 확인하는 수준). 복합적인 압박은 피하세요.",
+    "medium": "질문 난이도는 '보통'입니다. 근거가 약하거나 생략된 지점 하나를 짚어 "
+               "적당히 파고드는 질문을 던지세요.",
+    "hard": "질문 난이도는 '어려움'입니다. 발표에서 약점 두 가지를 동시에 엮어 "
+            "(예: 근거 부족 + 논리적 비약) 반박하기 어려운 복합 압박 질문을 던지세요.",
+}
+
+
 # ---------------------------------------------------------------- questions
-def build_question_prompt(persona_system: str, script: str, slides: List[Slide]):
+def build_question_prompt(persona_system: str, script: str, slides: List[Slide],
+                          difficulty: str = "medium"):
+    difficulty_hint = _DIFFICULTY_HINTS.get(difficulty, _DIFFICULTY_HINTS["medium"])
     system = (
         persona_system
+        + f"\n\n{difficulty_hint}"
         + "\n\n반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트를 덧붙이지 마세요:\n"
         + '{"question": "<질문 한 개>", "targets_slide": <슬라이드 번호 정수 또는 null>}'
     )
@@ -34,20 +47,21 @@ def build_question_prompt(persona_system: str, script: str, slides: List[Slide])
 
 # ---------------------------------------------------------------- evaluate
 def build_evaluate_prompt(persona_system: str, script: str, question: str,
-                          answer: str, turn: int):
-    allow_followup = turn < 2
+                          answer: str, turn: int, max_turns: int = 2):
+    allow_followup = turn < max_turns
     system = (
         persona_system
         + "\n\n당신은 방금 던진 질문에 대한 학생의 답변을 평가합니다. "
-        + "다음 루브릭으로 채점하세요: (1) 질문에 직접 답했는가, "
-        + "(2) 근거를 제시했는가, (3) 논리가 일관적인가.\n"
+        + "다음 세 축으로 각각 '부족'/'보통'/'우수' 중 하나로 채점하세요: "
+        + "직접성(질문에 직접 답했는가), 근거(근거를 제시했는가), 논리(논리가 일관적인가).\n"
         + ("답변이 불충분하면 같은 약점을 더 파고드는 꼬리 질문 1개를 followup 에 넣으세요. "
            if allow_followup
            else "이번 턴에서는 더 이상 꼬리 질문을 하지 말고 followup 을 반드시 null 로 두세요. ")
         + "답변이 충분하면 followup 을 null 로 두세요.\n\n"
         + "반드시 아래 JSON 형식으로만 응답하세요:\n"
         + '{"verdict": "<한줄 총평>", "strengths": "<잘한 점>", '
-        + '"gaps": "<부족한 점>", "followup": "<꼬리질문 또는 null>"}'
+        + '"gaps": "<부족한 점>", "followup": "<꼬리질문 또는 null>", '
+        + '"rubric": {"직접성": "부족|보통|우수", "근거": "부족|보통|우수", "논리": "부족|보통|우수"}}'
     )
     user = (
         f"[발표 대본 요약 참고]\n{script[:1500]}\n\n"

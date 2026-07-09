@@ -1,6 +1,8 @@
 """Pydantic request/response models for the sparring API."""
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
+
+Difficulty = Literal["easy", "medium", "hard"]
 
 
 class Slide(BaseModel):
@@ -13,6 +15,7 @@ class QuestionRequest(BaseModel):
     script: str
     slides: List[Slide] = Field(default_factory=list)
     persona_id: str
+    difficulty: Difficulty = "medium"
 
 
 class QuestionResponse(BaseModel):
@@ -27,6 +30,7 @@ class EvaluateRequest(BaseModel):
     question: str
     answer: str
     turn: int = 0
+    max_turns: int = Field(default=2, ge=0, le=5)
 
 
 class EvaluateResponse(BaseModel):
@@ -34,6 +38,7 @@ class EvaluateResponse(BaseModel):
     strengths: str
     gaps: str
     followup: Optional[str] = None
+    rubric: Dict[str, str] = Field(default_factory=dict)
 
 
 # --- /api/report ---

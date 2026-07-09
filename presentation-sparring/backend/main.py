@@ -45,7 +45,9 @@ def health():
 @app.post("/api/questions", response_model=QuestionResponse)
 def questions(req: QuestionRequest):
     persona = get_persona(req.persona_id)
-    system, user = prompts.build_question_prompt(persona["system"], req.script, req.slides)
+    system, user = prompts.build_question_prompt(
+        persona["system"], req.script, req.slides, req.difficulty
+    )
     try:
         data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))
     except Exception as e:  # noqa: BLE001
@@ -58,11 +60,25 @@ def questions(req: QuestionRequest):
     return QuestionResponse(question=str(data.get("question", "")).strip(), targets_slide=targets)
 
 
+_RUBRIC_AXES = ("직접성", "근거", "논리")
+_RUBRIC_VALUES = {"부족", "보통", "우수"}
+
+
+def _parse_rubric(raw) -> Dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        axis: raw[axis]
+        for axis in _RUBRIC_AXES
+        if isinstance(raw.get(axis), str) and raw[axis] in _RUBRIC_VALUES
+    }
+
+
 @app.post("/api/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest):
     persona = get_persona(req.persona_id)
     system, user = prompts.build_evaluate_prompt(
-        persona["system"], req.script, req.question, req.answer, req.turn
+        persona["system"], req.script, req.question, req.answer, req.turn, req.max_turns
     )
     try:
         data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))
@@ -71,14 +87,15 @@ def evaluate(req: EvaluateRequest):
     followup = data.get("followup")
     if isinstance(followup, str) and followup.strip().lower() in ("null", "none", ""):
         followup = None
-    # Hard guard: never allow a followup once turn >= 2.
-    if req.turn >= 2:
+    # Hard guard: never allow a followup once turn >= max_turns.
+    if req.turn >= req.max_turns:
         followup = None
     return EvaluateResponse(
         verdict=str(data.get("verdict", "")).strip(),
         strengths=str(data.get("strengths", "")).strip(),
         gaps=str(data.get("gaps", "")).strip(),
         followup=followup.strip() if isinstance(followup, str) else None,
+        rubric=_parse_rubric(data.get("rubric")),
     )
 
 

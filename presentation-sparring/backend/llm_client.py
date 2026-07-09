@@ -166,6 +166,7 @@ def _call_mock(system: str, user: str, model: str) -> str:
             "strengths": "핵심 개념을 이해하고 답변의 방향은 맞습니다.",
             "gaps": "구체적 근거와 예시가 부족해 설득력이 약합니다.",
             "followup": followup,
+            "rubric": {"직접성": "보통", "근거": "부족", "논리": "보통"},
         }, ensure_ascii=False)
     # report
     return json.dumps({
