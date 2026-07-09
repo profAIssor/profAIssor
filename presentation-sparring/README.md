@@ -49,13 +49,15 @@ npm run dev                   # http://localhost:5173
 `backend/.env` 의 `LLM_PROVIDER` **한 줄만** 바꾸면 된다:
 
 ```
-LLM_PROVIDER=mock          # gemini | groq | anthropic | mock
+LLM_PROVIDER=mock          # openai | gemini | groq | anthropic | mock
+OPENAI_API_KEY=...
 GEMINI_API_KEY=...
 GROQ_API_KEY=...
 ANTHROPIC_API_KEY=...
 ```
 
 - `mock` — API 키 없이 캔드 응답으로 전체 흐름을 데모 (오프라인 시연/개발용)
+- `openai` — OpenAI (`gpt-4o-mini`) — **프로덕션(Render) 기본값**
 - `gemini` — Google Gemini (`gemini-2.0-flash`)
 - `groq` — Groq (`llama-3.3-70b-versatile`)
 - `anthropic` — Anthropic Claude (`claude-sonnet-5`, 교수 페르소나는 `claude-opus-4-8` 상위 티어로 라우팅)
