@@ -1,6 +1,6 @@
 """LLM provider abstraction.
 
-Switch providers with the LLM_PROVIDER env var: gemini | groq | anthropic | mock.
+Switch providers with the LLM_PROVIDER env var: openai | gemini | groq | anthropic | mock.
 A single `chat(system, user, model_hint)` entry point hides each provider behind
 a thin REST wrapper. `mock` returns deterministic canned JSON so the whole app
 can be demoed / curl-tested with no API keys.
@@ -17,6 +17,11 @@ PROVIDER = os.getenv("LLM_PROVIDER", "mock").lower()
 # Per-provider default model, plus an optional "high tier" model used when a
 # persona requests a heavier model (model_hint == "high"). Env-overridable.
 _MODEL_CONFIG = {
+    "openai": {
+        "default": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        "high": os.getenv("OPENAI_MODEL_HIGH", "gpt-4o-mini"),
+        "url": "https://api.openai.com/v1/chat/completions",
+    },
     "anthropic": {
         "default": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
         "high": os.getenv("ANTHROPIC_MODEL_HIGH", "claude-opus-4-8"),
@@ -45,6 +50,31 @@ def _resolve_model(provider: str, model_hint: Optional[str]) -> str:
 
 
 # --------------------------------------------------------------- providers
+def _call_openai(system: str, user: str, model: str) -> str:
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    resp = requests.post(
+        _MODEL_CONFIG["openai"]["url"],
+        headers={
+            "Authorization": f"Bearer {key}",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.7,
+        },
+        timeout=_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+
 def _call_anthropic(system: str, user: str, model: str) -> str:
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
@@ -147,6 +177,7 @@ def _call_mock(system: str, user: str, model: str) -> str:
 
 
 _DISPATCH = {
+    "openai": _call_openai,
     "anthropic": _call_anthropic,
     "gemini": _call_gemini,
     "groq": _call_groq,
@@ -160,7 +191,7 @@ def chat(system: str, user: str, model_hint: Optional[str] = None) -> str:
     fn = _DISPATCH.get(PROVIDER)
     if fn is None:
         raise RuntimeError(
-            f"Unknown LLM_PROVIDER={PROVIDER!r}. Use gemini|groq|anthropic|mock."
+            f"Unknown LLM_PROVIDER={PROVIDER!r}. Use openai|gemini|groq|anthropic|mock."
         )
     model = _resolve_model(PROVIDER, model_hint)
     return fn(system, user, model)
