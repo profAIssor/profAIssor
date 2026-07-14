@@ -1,4 +1,5 @@
 """FastAPI app: CORS + 3 routes (questions / evaluate / report)."""
+import logging
 import os
 import re
 from typing import Dict, List
@@ -8,6 +9,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 import llm_client
 import prompts
@@ -51,8 +55,9 @@ def questions(req: QuestionRequest):
     )
     try:
         data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM call failed in /api/questions")
+        raise HTTPException(status_code=502, detail="AI 질문 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
     targets = data.get("targets_slide")
     if isinstance(targets, str) and targets.strip().isdigit():
         targets = int(targets)
@@ -80,12 +85,14 @@ def evaluate(req: EvaluateRequest):
     persona = get_persona(req.persona_id)
     persona_system = persona["system"] + get_field_hint(req.field)
     system, user = prompts.build_evaluate_prompt(
-        persona_system, req.script, req.question, req.answer, req.turn, req.max_turns
+        persona_system, req.script, req.question, req.answer, req.turn, req.max_turns,
+        req.term_hints,
     )
     try:
         data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM call failed in /api/evaluate")
+        raise HTTPException(status_code=502, detail="AI 평가 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
     followup = data.get("followup")
     if isinstance(followup, str) and followup.strip().lower() in ("null", "none", ""):
         followup = None
@@ -157,8 +164,9 @@ def report(req: ReportRequest):
     system, user = prompts.build_report_prompt(req.script, req.slides, req.transcript)
     try:
         data = llm_client.chat_json(system, user)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM call failed in /api/report")
+        raise HTTPException(status_code=502, detail="리포트 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
     # Merge LLM coverage (if any) with a deterministic fallback so EVERY slide
     # is represented and coverage always shows in the report.

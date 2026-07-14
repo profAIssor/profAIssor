@@ -48,6 +48,7 @@ export function evaluateAnswer(args: {
   turn: number
   maxTurns: number
   field: AcademicField | null
+  termHints?: string[]
 }): Promise<EvaluateResponse> {
   return post('/api/evaluate', {
     script: args.script,
@@ -57,6 +58,7 @@ export function evaluateAnswer(args: {
     turn: args.turn,
     max_turns: args.maxTurns,
     field: args.field,
+    term_hints: args.termHints ?? [],
   })
 }
 

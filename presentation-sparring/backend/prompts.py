@@ -47,8 +47,17 @@ def build_question_prompt(persona_system: str, script: str, slides: List[Slide],
 
 # ---------------------------------------------------------------- evaluate
 def build_evaluate_prompt(persona_system: str, script: str, question: str,
-                          answer: str, turn: int, max_turns: int = 2):
+                          answer: str, turn: int, max_turns: int = 2,
+                          term_hints: List[str] | None = None):
     allow_followup = turn < max_turns
+    term_hint_text = ""
+    if term_hints:
+        term_hint_text = (
+            "\n\n[전공 용어 참고 목록] 아래는 이 발표의 대본/슬라이드에 등장하는 용어입니다. "
+            "학생 답변은 음성 인식(STT)으로 받아쓴 것이라 발음이 비슷한 용어가 오탈자로 "
+            "바뀌었을 수 있습니다 — 이 목록을 참고해 그런 오탈자는 실제 오답으로 채점하지 마세요: "
+            + ", ".join(term_hints)
+        )
     system = (
         persona_system
         + "\n\n당신은 방금 던진 질문에 대한 학생의 답변을 평가합니다. "
@@ -57,8 +66,9 @@ def build_evaluate_prompt(persona_system: str, script: str, question: str,
         + ("답변이 불충분하면 같은 약점을 더 파고드는 꼬리 질문 1개를 followup 에 넣으세요. "
            if allow_followup
            else "이번 턴에서는 더 이상 꼬리 질문을 하지 말고 followup 을 반드시 null 로 두세요. ")
-        + "답변이 충분하면 followup 을 null 로 두세요.\n\n"
-        + "반드시 아래 JSON 형식으로만 응답하세요:\n"
+        + "답변이 충분하면 followup 을 null 로 두세요."
+        + term_hint_text
+        + "\n\n반드시 아래 JSON 형식으로만 응답하세요:\n"
         + '{"verdict": "<한줄 총평>", "strengths": "<잘한 점>", '
         + '"gaps": "<부족한 점>", "followup": "<꼬리질문 또는 null>", '
         + '"rubric": {"직접성": "부족|보통|우수", "근거": "부족|보통|우수", "논리": "부족|보통|우수"}}'
