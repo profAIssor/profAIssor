@@ -1,7 +1,8 @@
 import { Mic, Send, Square } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { evaluateAnswer, fetchQuestion } from '../api'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
+import { buildTermDictionary, correctText } from '../lib/termCorrection'
 import { getPersona } from '../personas'
 import type { AcademicField, ChatMessage, Difficulty, PersonaId, Slide, TranscriptTurn } from '../types'
 
@@ -38,6 +39,10 @@ export default function SparScreen({
   const startedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // Presentation-specific term dictionary (script + slides) used to correct
+  // likely STT mishearings of technical terms — built once per session.
+  const termDict = useMemo(() => buildTermDictionary(script, slides), [script, slides])
+
   // 🎙 STT: dictation appends recognized text into the answer box (additive —
   // the text loop is unchanged; the user can still type/edit before sending).
   const {
@@ -48,7 +53,8 @@ export default function SparScreen({
   } = useSpeechRecognition({
     onFinal: (text) => {
       if (!text) return
-      setAnswer((prev) => (prev.trim() ? prev.trimEnd() + ' ' : '') + text)
+      const corrected = correctText(text, termDict)
+      setAnswer((prev) => (prev.trim() ? prev.trimEnd() + ' ' : '') + corrected)
     },
     onInterim: setInterim,
   })
@@ -108,6 +114,7 @@ export default function SparScreen({
         turn: currentTurn,
         maxTurns,
         field,
+        termHints: termDict,
       })
       pushMessage({
         role: 'verdict',

@@ -85,7 +85,8 @@ def evaluate(req: EvaluateRequest):
     persona = get_persona(req.persona_id)
     persona_system = persona["system"] + get_field_hint(req.field)
     system, user = prompts.build_evaluate_prompt(
-        persona_system, req.script, req.question, req.answer, req.turn, req.max_turns
+        persona_system, req.script, req.question, req.answer, req.turn, req.max_turns,
+        req.term_hints,
     )
     try:
         data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))

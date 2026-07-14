@@ -34,6 +34,9 @@ class EvaluateRequest(BaseModel):
     turn: int = 0
     max_turns: int = Field(default=2, ge=0, le=5)
     field: Optional[AcademicField] = None
+    # Presentation-specific terms (from the frontend's script/slide dictionary)
+    # so the evaluator can look past likely STT mishearings in `answer`.
+    term_hints: List[str] = Field(default_factory=list)
 
 
 class EvaluateResponse(BaseModel):
