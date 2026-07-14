@@ -35,11 +35,15 @@ class EvaluateRequest(BaseModel):
     script: str
     persona_id: str
     question: str
+    # 현재 persona의 최초 질문. 꼬리질문이 처음 쟁점에서 벗어나지 않도록 유지
+    root_question: Optional[str] = None
     answer: str
     turn: int = 0
     # 최초 질문 이후 허용되는 최대 꼬리질문 횟수
     # 기본값은 2회이며, 사용자는 0~3회 범위 내 선택
     max_turns: int = Field(default=2, ge=0, le=3)
+    # 최초 질문에서 선택한 난이도를 평가와 꼬리질문에도 유지
+    difficulty: Difficulty = "medium"
     field: Optional[AcademicField] = None
     # Presentation-specific terms (from the frontend's script/slide dictionary)
     # so the evaluator can look past likely STT mishearings in `answer`.

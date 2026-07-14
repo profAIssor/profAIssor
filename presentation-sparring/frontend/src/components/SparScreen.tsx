@@ -1,10 +1,19 @@
 import { Mic, Send, Square } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+
 import { evaluateAnswer, fetchQuestion } from '../api'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
 import { buildTermDictionary, correctText } from '../lib/termCorrection'
 import { getPersona } from '../personas'
-import type { AcademicField, ChatMessage, Difficulty, PersonaId, Slide, TranscriptTurn } from '../types'
+import type {
+  AcademicField,
+  ChatMessage,
+  Difficulty,
+  PersonaId,
+  Slide,
+  TranscriptTurn,
+} from '../types'
+
 
 interface Props {
   script: string
@@ -15,6 +24,7 @@ interface Props {
   field: AcademicField | null
   onFinish: (transcript: TranscriptTurn[]) => void
 }
+
 
 export default function SparScreen({
   script,
@@ -28,23 +38,20 @@ export default function SparScreen({
   const [personaIndex, setPersonaIndex] = useState(0)
   const [turn, setTurn] = useState(0)
   const [question, setQuestion] = useState<string | null>(null)
+  const [rootQuestion, setRootQuestion] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [answer, setAnswer] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
   const [interim, setInterim] = useState('')
 
   const transcriptRef = useRef<TranscriptTurn[]>([])
   const startedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Presentation-specific term dictionary (script + slides) used to correct
-  // likely STT mishearings of technical terms — built once per session.
+  // 대본과 슬라이드에서 용어 사전을 한 번 만들고 STT 오인식 보정에 재사용합니다.
   const termDict = useMemo(() => buildTermDictionary(script, slides), [script, slides])
 
-  // 🎙 STT: dictation appends recognized text into the answer box (additive —
-  // the text loop is unchanged; the user can still type/edit before sending).
   const {
     supported: sttSupported,
     listening,
@@ -55,7 +62,9 @@ export default function SparScreen({
     onFinal: (text) => {
       if (!text) return
       const corrected = correctText(text, termDict)
-      setAnswer((prev) => (prev.trim() ? prev.trimEnd() + ' ' : '') + corrected)
+      setAnswer((previous) =>
+        (previous.trim() ? `${previous.trimEnd()} ` : '') + corrected,
+      )
     },
     onInterim: setInterim,
   })
@@ -63,25 +72,40 @@ export default function SparScreen({
   const activePersonaId = personaIds[personaIndex]
   const persona = getPersona(activePersonaId)
 
-  const pushMessage = (m: ChatMessage) => setMessages((prev) => [...prev, m])
+  const pushMessage = (message: ChatMessage) => {
+    setMessages((previous) => [...previous, message])
+  }
 
-  // Fetch the first (turn-0) question for a given persona.
-  const loadFirstQuestion = async (pIndex: number) => {
+  // 각 persona의 최초 질문을 불러오고 이후 꼬리질문의 기준점으로 보관합니다.
+  const loadFirstQuestion = async (targetPersonaIndex: number) => {
     setBusy(true)
     setError(null)
+
     try {
-      const pid = personaIds[pIndex]
-      const q = await fetchQuestion(script, slides, pid, difficulty, field)
-      setQuestion(q.question)
-      pushMessage({ role: 'question', personaId: pid, text: q.question })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const personaId = personaIds[targetPersonaIndex]
+      const response = await fetchQuestion(
+        script,
+        slides,
+        personaId,
+        difficulty,
+        field,
+      )
+
+      setQuestion(response.question)
+      setRootQuestion(response.question)
+      pushMessage({
+        role: 'question',
+        personaId,
+        text: response.question,
+      })
+    } catch (exception) {
+      setError(exception instanceof Error ? exception.message : String(exception))
     } finally {
       setBusy(false)
     }
   }
 
-  // Kick off the very first question once (guard against StrictMode double-run).
+  // React StrictMode의 개발 환경 이중 실행을 막고 첫 질문을 한 번만 요청합니다.
   useEffect(() => {
     if (startedRef.current) return
     startedRef.current = true
@@ -90,74 +114,95 @@ export default function SparScreen({
   }, [])
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: 'smooth',
+    })
   }, [messages])
 
   const submit = async () => {
     if (!question || !answer.trim() || busy) return
+
     stopMic()
     setInterim('')
-    const pid = activePersonaId
-    const q = question
+
+    const personaId = activePersonaId
+    const currentQuestion = question
+    const firstQuestion = rootQuestion ?? currentQuestion
     const currentTurn = turn
+    const studentAnswer = answer.trim()
+
     setBusy(true)
     setError(null)
-    pushMessage({ role: 'answer', personaId: pid, text: answer })
-    const studentAnswer = answer
+    pushMessage({
+      role: 'answer',
+      personaId,
+      text: studentAnswer,
+    })
     setAnswer('')
 
     try {
-      const ev = await evaluateAnswer({
+      const evaluation = await evaluateAnswer({
         script,
-        personaId: pid,
-        question: q,
+        personaId,
+        rootQuestion: firstQuestion,
+        question: currentQuestion,
         answer: studentAnswer,
         turn: currentTurn,
         maxTurns,
+        difficulty,
         field,
         termHints: termDict,
       })
+
       pushMessage({
         role: 'verdict',
-        personaId: pid,
-        text: `평가: ${ev.verdict}\n👍 ${ev.strengths}\n⚠️ ${ev.gaps}`,
-        rubric: ev.rubric,
-      })
-      transcriptRef.current.push({
-        persona_id: pid,
-        question: q,
-        answer: studentAnswer,
-        verdict: ev.verdict,
-        gaps: ev.gaps,
+        personaId,
+        text: `평가: ${evaluation.verdict}\n✅ ${evaluation.strengths}\n⚠️ ${evaluation.gaps}`,
+        rubric: evaluation.rubric,
       })
 
-      if (ev.followup) {
-        // Same persona digs deeper.
-        setQuestion(ev.followup)
+      transcriptRef.current.push({
+        persona_id: personaId,
+        question: currentQuestion,
+        answer: studentAnswer,
+        verdict: evaluation.verdict,
+        gaps: evaluation.gaps,
+      })
+
+      if (evaluation.followup) {
+        // 같은 persona가 최초 질문의 핵심 쟁점을 유지하며 더 깊게 파고듭니다.
+        setQuestion(evaluation.followup)
         setTurn(currentTurn + 1)
-        pushMessage({ role: 'question', personaId: pid, text: ev.followup })
+        pushMessage({
+          role: 'question',
+          personaId,
+          text: evaluation.followup,
+        })
         setBusy(false)
-      } else {
-        // Rotate to the next persona, or finish.
-        const nextIdx = personaIndex + 1
-        if (nextIdx < personaIds.length) {
-          setPersonaIndex(nextIdx)
-          setTurn(0)
-          setQuestion(null)
-          await loadFirstQuestion(nextIdx)
-        } else {
-          onFinish(transcriptRef.current)
-        }
+        return
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+
+      // 꼬리질문이 없으면 다음 persona로 이동하거나 스파링을 종료합니다.
+      const nextPersonaIndex = personaIndex + 1
+      if (nextPersonaIndex < personaIds.length) {
+        setPersonaIndex(nextPersonaIndex)
+        setTurn(0)
+        setQuestion(null)
+        setRootQuestion(null)
+        await loadFirstQuestion(nextPersonaIndex)
+      } else {
+        onFinish(transcriptRef.current)
+      }
+    } catch (exception) {
+      setError(exception instanceof Error ? exception.message : String(exception))
       setBusy(false)
     }
   }
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault()
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault()
       void submit()
     }
   }
@@ -175,19 +220,20 @@ export default function SparScreen({
             <div className="text-xs text-slate-400">현재 상대 페르소나</div>
           </div>
         </div>
+
         <div className="flex items-center gap-2">
-          {personaIds.map((id, i) => (
+          {personaIds.map((personaId, index) => (
             <span
-              key={id}
+              key={personaId}
               className={
                 'h-2 w-8 rounded-full ' +
-                (i < personaIndex
+                (index < personaIndex
                   ? 'bg-indigo-600'
-                  : i === personaIndex
+                  : index === personaIndex
                     ? 'animate-pulse bg-indigo-400'
                     : 'bg-slate-200')
               }
-              title={getPersona(id).name}
+              title={getPersona(personaId).name}
             />
           ))}
           <span className="ml-2 text-xs font-semibold text-slate-400">
@@ -196,28 +242,34 @@ export default function SparScreen({
         </div>
       </div>
 
-      {/* chat log */}
+      {/* Chat log */}
       <div
         ref={scrollRef}
         className="flex h-[420px] flex-col space-y-4 overflow-y-auto rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm"
       >
-        {messages.map((m, i) => {
-          const p = getPersona(m.personaId)
-          if (m.role === 'answer') {
+        {messages.map((message, index) => {
+          const messagePersona = getPersona(message.personaId)
+
+          if (message.role === 'answer') {
             return (
-              <div key={i} className="flex justify-end">
+              <div key={index} className="flex justify-end">
                 <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-indigo-600 px-4 py-2.5 text-sm text-white shadow-sm">
-                  {m.text}
+                  {message.text}
                 </div>
               </div>
             )
           }
-          if (m.role === 'verdict') {
-            const rubricEntries = m.rubric ? Object.entries(m.rubric) : []
+
+          if (message.role === 'verdict') {
+            const rubricEntries = message.rubric
+              ? Object.entries(message.rubric)
+              : []
+
             return (
-              <div key={i} className="flex justify-center">
+              <div key={index} className="flex justify-center">
                 <div className="w-full max-w-[90%] space-y-2 rounded-xl border border-slate-100 bg-slate-50 px-4 py-2.5 text-xs leading-relaxed text-slate-600">
-                  <div className="whitespace-pre-wrap">{m.text}</div>
+                  <div className="whitespace-pre-wrap">{message.text}</div>
+
                   {rubricEntries.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 pt-0.5">
                       {rubricEntries.map(([axis, value]) => (
@@ -241,26 +293,39 @@ export default function SparScreen({
               </div>
             )
           }
+
           return (
-            <div key={i} className="flex justify-start">
+            <div key={index} className="flex justify-start">
               <div className="max-w-[80%] rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm">
                 <div className="mb-1 flex items-center gap-1 text-xs font-bold text-indigo-600">
-                  <span>{p.emoji}</span>
-                  {p.name}
+                  <span>{messagePersona.emoji}</span>
+                  {messagePersona.name}
                 </div>
-                <span className="whitespace-pre-wrap text-slate-700">{m.text}</span>
+                <span className="whitespace-pre-wrap text-slate-700">
+                  {message.text}
+                </span>
               </div>
             </div>
           )
         })}
+
         {busy && (
           <div className="flex justify-start">
             <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-400 shadow-sm">
               생각 중…
               <div className="flex gap-1">
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-600" style={{ animationDelay: '0ms' }} />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-600" style={{ animationDelay: '150ms' }} />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-600" style={{ animationDelay: '300ms' }} />
+                <span
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-600"
+                  style={{ animationDelay: '0ms' }}
+                />
+                <span
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-600"
+                  style={{ animationDelay: '150ms' }}
+                />
+                <span
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-600"
+                  style={{ animationDelay: '300ms' }}
+                />
               </div>
             </div>
           </div>
@@ -275,19 +340,20 @@ export default function SparScreen({
 
       {micError && (
         <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-2.5 text-sm text-rose-600">
-          🎙 {micError}
+          {micError}
         </div>
       )}
 
-      {/* live dictation preview */}
+      {/* Live dictation preview */}
       {listening && (
         <div className="flex items-center gap-2 text-xs text-indigo-600">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-rose-500" />
-          받아쓰는 중… <span className="text-slate-400">{interim || '(말해보세요)'}</span>
+          받아쓰는 중…
+          <span className="text-slate-400">{interim || '(말해보세요)'}</span>
         </div>
       )}
 
-      {/* answer input */}
+      {/* Answer input */}
       <div className="flex gap-2 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-sm">
         {sttSupported && (
           <button
@@ -310,9 +376,10 @@ export default function SparScreen({
             )}
           </button>
         )}
+
         <textarea
           value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
+          onChange={(event) => setAnswer(event.target.value)}
           onKeyDown={onKeyDown}
           disabled={busy || !question}
           rows={2}
@@ -323,6 +390,7 @@ export default function SparScreen({
           }
           className="flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-700 outline-none focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
         />
+
         <button
           type="button"
           onClick={() => void submit()}
