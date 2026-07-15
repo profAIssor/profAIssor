@@ -39,8 +39,8 @@ const SAMPLE_SLIDES: Slide[] = [
 ]
 
 export default function SetupScreen({ onStart }: Props) {
-  const [script, setScript] = useState(SAMPLE_SCRIPT)
-  const [slides, setSlides] = useState<Slide[]>(SAMPLE_SLIDES)
+  const [script, setScript] = useState('')
+  const [slides, setSlides] = useState<Slide[]>([])
   const [selected, setSelected] = useState<PersonaId[]>(['professor', 'peer'])
   const [difficulty, setDifficulty] = useState<Difficulty>('medium')
   const [maxTurns, setMaxTurns] = useState(2)
@@ -50,6 +50,15 @@ export default function SetupScreen({ onStart }: Props) {
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id],
     )
+  }
+
+  const fillSample = () => {
+    const hasContent = script.trim().length > 0 || slides.some((s) => s.text.trim().length > 0)
+    if (hasContent && !window.confirm('입력한 대본/슬라이드가 예시 데이터로 대체됩니다. 계속할까요?')) {
+      return
+    }
+    setScript(SAMPLE_SCRIPT)
+    setSlides(SAMPLE_SLIDES)
   }
 
   const canStart = script.trim().length > 0 && selected.length > 0
@@ -69,13 +78,22 @@ export default function SetupScreen({ onStart }: Props) {
         {/* Left column: script + slides */}
         <div className="space-y-6 lg:col-span-7">
           <div className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
-            <label
-              htmlFor="script-textarea"
-              className="flex items-center gap-2 text-lg font-semibold text-slate-800"
-            >
-              <FileText className="h-5 w-5 text-indigo-500" />
-              발표 대본
-            </label>
+            <div className="flex items-center justify-between gap-3">
+              <label
+                htmlFor="script-textarea"
+                className="flex items-center gap-2 text-lg font-semibold text-slate-800"
+              >
+                <FileText className="h-5 w-5 text-indigo-500" />
+                발표 대본
+              </label>
+              <button
+                type="button"
+                onClick={fillSample}
+                className="shrink-0 text-xs font-semibold text-indigo-500 hover:text-indigo-700 hover:underline"
+              >
+                예시 데이터로 채우기
+              </button>
+            </div>
             <p className="text-xs text-slate-400">
               실제로 발표할 대본을 그대로 붙여넣으세요. AI 심사관이 이를 바탕으로 날카로운 꼬리 질문을 던집니다.
             </p>
@@ -231,6 +249,11 @@ export default function SetupScreen({ onStart }: Props) {
           >
             스파링 시작 →
           </button>
+          {!canStart && (
+            <p className="text-center text-xs text-slate-400">
+              {script.trim().length === 0 ? '발표 대본을 입력해야 시작할 수 있어요' : '청중 페르소나를 1개 이상 선택해주세요'}
+            </p>
+          )}
         </div>
       </div>
     </div>
