@@ -98,9 +98,6 @@ export default function SetupScreen({ onStart }: Props) {
                 예시 데이터로 채우기
               </button>
             </div>
-            <p className="text-xs text-slate-400">
-              실제로 발표할 대본을 그대로 붙여넣으세요. AI 심사관이 이를 바탕으로 날카로운 꼬리 질문을 던집니다.
-            </p>
             <textarea
               id="script-textarea"
               value={script}
@@ -116,9 +113,6 @@ export default function SetupScreen({ onStart }: Props) {
               <Sparkles className="h-5 w-5 text-indigo-500" />
               발표자료 슬라이드 텍스트
             </label>
-            <p className="text-xs text-slate-400">
-              슬라이드별 핵심 텍스트를 입력하면, 대본에서 말로 전달되지 않은 슬라이드 내용을 리포트에서 찾아줍니다.
-            </p>
             <SlideInput slides={slides} onChange={setSlides} />
           </div>
         </div>
@@ -219,10 +213,6 @@ export default function SetupScreen({ onStart }: Props) {
                   +
                 </button>
               </div>
-
-              <p className="text-xs leading-relaxed text-slate-400">
-                현재 설정: 최초 질문 1회 + 꼬리질문 최대 {maxTurns}회
-              </p>
             </div>
 
             <div className="space-y-2">

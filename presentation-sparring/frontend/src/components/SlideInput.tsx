@@ -46,29 +46,26 @@ export default function SlideInput({ slides, onChange }: Props) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <label
-          className={
-            'flex cursor-pointer items-center gap-1.5 rounded-lg border border-dashed border-slate-300 px-4 py-2 text-sm font-medium text-slate-500 hover:border-indigo-400 hover:text-indigo-600 ' +
-            (uploading ? 'pointer-events-none opacity-50' : '')
-          }
-        >
-          <Upload className="h-3.5 w-3.5" />
-          {uploading ? 'PPT에서 추출하는 중…' : 'PPT 업로드 (.pptx)'}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pptx"
-            className="hidden"
-            disabled={uploading}
-            onChange={(e) => {
-              const file = e.target.files?.[0]
-              if (file) void handleFile(file)
-            }}
-          />
-        </label>
-        <span className="text-xs text-slate-400">업로드하면 아래 목록이 자동으로 채워집니다 (직접 수정 가능)</span>
-      </div>
+      <label
+        className={
+          'flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 ' +
+          (uploading ? 'pointer-events-none opacity-50' : '')
+        }
+      >
+        <Upload className="h-4 w-4" />
+        {uploading ? 'PPT에서 추출하는 중…' : 'PPT 업로드 (.pptx)'}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pptx"
+          className="hidden"
+          disabled={uploading}
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) void handleFile(file)
+          }}
+        />
+      </label>
 
       {uploadError && (
         <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-2.5 text-sm text-rose-600">
@@ -101,10 +98,10 @@ export default function SlideInput({ slides, onChange }: Props) {
       <button
         type="button"
         onClick={add}
-        className="flex items-center gap-1.5 rounded-lg border border-dashed border-slate-300 px-4 py-2 text-sm font-medium text-slate-500 hover:border-indigo-400 hover:text-indigo-600"
+        className="flex items-center gap-1 text-sm font-medium text-slate-400 hover:text-indigo-600"
       >
         <Plus className="h-3.5 w-3.5" />
-        슬라이드 추가
+        슬라이드 직접 추가
       </button>
     </div>
   )
