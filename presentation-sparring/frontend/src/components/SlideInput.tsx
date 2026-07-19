@@ -8,7 +8,7 @@ interface Props {
   onChange: (slides: Slide[]) => void
 }
 
-/** Dynamic list of slide-text inputs (add / remove / edit / PPT upload). */
+/** 슬라이드 텍스트 추가·삭제·수정 및 PPT 업로드 입력 목록 */
 export default function SlideInput({ slides, onChange }: Props) {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -17,6 +17,7 @@ export default function SlideInput({ slides, onChange }: Props) {
   const handleFile = async (file: File) => {
     setUploading(true)
     setUploadError(null)
+
     try {
       const extracted = await extractSlides(file)
       onChange(extracted)
@@ -41,6 +42,7 @@ export default function SlideInput({ slides, onChange }: Props) {
     const next = slides
       .filter((_, idx) => idx !== i)
       .map((s, idx) => ({ ...s, index: idx + 1 }))
+
     onChange(next)
   }
 
@@ -95,6 +97,7 @@ export default function SlideInput({ slides, onChange }: Props) {
           </button>
         </div>
       ))}
+
       <button
         type="button"
         onClick={add}

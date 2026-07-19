@@ -114,7 +114,10 @@ def _call_openai(system: str, user: str, model: str) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.7,
+            "temperature": 0.3,
+
+            # JSON 객체 출력 강제
+            "response_format": {"type": "json_object"},
         },
         timeout=_TIMEOUT,
     )
@@ -446,9 +449,19 @@ def chat_json(
     user: str,
     model_hint: Optional[str] = None,
 ) -> dict:
-    """LLM 응답에서 JSON 객체를 추출해 반환"""
+    """LLM 응답의 JSON 객체 변환"""
+
     raw_response = chat(system, user, model_hint)
-    return extract_json(raw_response)
+
+    try:
+        return extract_json(raw_response)
+    except (json.JSONDecodeError, ValueError):
+        # 민감 정보 제외를 위한 응답 앞부분 기록
+        _logger.exception(
+            "LLM JSON parsing failed: response=%r",
+            raw_response[:1000],
+        )
+        raise
 
 
 def extract_json(text: str) -> dict:

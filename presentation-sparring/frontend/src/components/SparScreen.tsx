@@ -39,13 +39,12 @@ export default function SparScreen({
   const [question, setQuestion] = useState<string | null>(null)
   const [rootQuestion, setRootQuestion] = useState<string | null>(null)
 
-  // 최초 질문 유형은 전체 흐름의 기준점으로 유지하고,
-  // 현재 질문 유형은 꼬리질문에서 한 번 전환될 수 있습니다.
+  // 최초 질문 유형 및 현재 질문 유형 상태
   const [rootQuestionType, setRootQuestionType] =
     useState<QuestionType | null>(null)
   const [questionType, setQuestionType] = useState<QuestionType | null>(null)
 
-  // 최초 질문을 만들 때 백엔드가 선택한 자료 맥락을 평가 요청까지 보존합니다.
+  // 질문 자료 맥락 보존
   const [questionFocus, setQuestionFocus] = useState('')
   const [contextSlides, setContextSlides] = useState<number[]>([])
   const [expectedAnswerPoints, setExpectedAnswerPoints] = useState<string[]>([])
@@ -56,18 +55,18 @@ export default function SparScreen({
   const [error, setError] = useState<string | null>(null)
   const [interim, setInterim] = useState('')
 
-  // 마지막 평가를 먼저 보여준 뒤 사용자가 직접 리포트로 이동하게 합니다.
+  // 마지막 평가 확인 후 리포트 이동 상태
   const [readyForReport, setReadyForReport] = useState(false)
 
   const transcriptRef = useRef<TranscriptTurn[]>([])
 
-  // 답변 불가 뒤 같은 persona가 새 질문을 만들 때 이전 질문을 제외합니다.
+  // 답변 불가 후 중복 질문 제외 목록
   const askedQuestionsRef = useRef<Partial<Record<PersonaId, string[]>>>({})
 
   const startedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 대본과 슬라이드에서 용어 사전을 한 번 만들고 STT 오인식 보정에 재사용합니다.
+  // STT 용어 사전 재사용
   const termDict = useMemo(() => buildTermDictionary(script, slides), [script, slides])
 
   const {
@@ -95,7 +94,7 @@ export default function SparScreen({
     setMessages((previous) => [...previous, message])
   }
 
-  // 각 persona의 최초 질문과 질문 유형을 불러오고 꼬리질문의 기준점으로 보관합니다.
+  // 페르소나별 최초 질문 및 자료 맥락 로드
   const loadFirstQuestion = async (targetPersonaIndex: number) => {
     setBusy(true)
     setError(null)
@@ -138,16 +137,17 @@ export default function SparScreen({
     }
   }
 
-  // React StrictMode의 개발 환경 이중 실행을 막고 첫 질문을 한 번만 요청합니다.
+  // 개발 환경 이중 실행 방지
   useEffect(() => {
     if (startedRef.current) return
 
     startedRef.current = true
     void loadFirstQuestion(0)
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 최초 질문 1회 실행 보장
   }, [])
 
+  // 새 메시지 자동 스크롤
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
@@ -165,8 +165,7 @@ export default function SparScreen({
     const currentQuestion = question
     const firstQuestion = rootQuestion ?? currentQuestion
 
-    // 정상적인 질문 응답에는 항상 유형이 포함됩니다.
-    // 이전 상태와의 호환을 위해 값이 없으면 정의 확인형으로 처리합니다.
+    // 질문 유형 이전 상태 호환 처리
     const firstQuestionType = rootQuestionType ?? questionType ?? 'definition'
     const currentQuestionType = questionType ?? firstQuestionType
     const currentTurn = turn
@@ -229,7 +228,7 @@ export default function SparScreen({
       })
 
       if (isUnknown && currentTurn < maxTurns) {
-        // 같은 질문을 다시 묻지 않고 남은 질문 횟수로 새 핵심 주제를 확인합니다.
+        // 답변 불가 후 새 핵심 질문 전환
         setTurn(currentTurn + 1)
         setQuestion(null)
         setRootQuestion(null)
@@ -244,8 +243,7 @@ export default function SparScreen({
       }
 
       if (evaluation.followup) {
-        // 핵심 주제와 난이도는 유지하되, 첫 꼬리질문에서는
-        // 이해 확인을 위해 인접 질문 유형으로 한 번 전환될 수 있습니다.
+        // 첫 꼬리질문 인접 유형 전환 지원
         const nextQuestionType =
           evaluation.followup_question_type ?? currentQuestionType
 
@@ -264,7 +262,7 @@ export default function SparScreen({
         return
       }
 
-      // 꼬리질문이 없으면 다음 persona로 이동합니다.
+      // 다음 페르소나 이동
       const nextPersonaIndex = personaIndex + 1
 
       if (nextPersonaIndex < personaIds.length) {
@@ -282,7 +280,7 @@ export default function SparScreen({
         return
       }
 
-      // 마지막 답변도 화면에서 확인할 수 있도록 자동 이동하지 않습니다.
+      // 마지막 평가 확인 대기
       setQuestion(null)
       setReadyForReport(true)
       setBusy(false)
@@ -305,44 +303,47 @@ export default function SparScreen({
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
-      {/* Persona banner + progress */}
-      <div className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-white px-5 py-3.5 shadow-sm">
+    <div className="mx-auto flex h-[calc(100dvh-8.5rem)] min-h-[480px] w-full max-w-4xl flex-col gap-4 sm:h-[calc(100dvh-10rem)] sm:min-h-[560px]">
+      {/* 페르소나 배너 및 진행도 */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white px-4 py-3.5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:px-5">
         <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 select-none items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-lg">
+          <span className="flex h-11 w-11 shrink-0 select-none items-center justify-center rounded-full bg-indigo-600 text-base font-bold text-white">
             {persona.emoji}
           </span>
           <div>
-            <div className="text-sm font-bold text-slate-800">{persona.name}</div>
-            <div className="text-xs text-slate-400">현재 상대 페르소나</div>
+            <div className="text-base font-bold text-slate-800">{persona.name}</div>
+            <div className="text-sm text-slate-500">현재 상대 페르소나</div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {personaIds.map((personaId, index) => (
-            <span
-              key={personaId}
-              className={
-                'h-2 w-8 rounded-full ' +
-                (index < personaIndex
-                  ? 'bg-indigo-600'
-                  : index === personaIndex
-                    ? 'animate-pulse bg-indigo-400'
-                    : 'bg-slate-200')
-              }
-              title={getPersona(personaId).name}
-            />
-          ))}
-          <span className="ml-2 text-xs font-semibold text-slate-400">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:flex-none sm:gap-2">
+            {personaIds.map((personaId, index) => (
+              <span
+                key={personaId}
+                className={
+                  'h-2 min-w-5 flex-1 rounded-full sm:w-8 sm:flex-none ' +
+                  (index < personaIndex
+                    ? 'bg-indigo-600'
+                    : index === personaIndex
+                      ? 'animate-pulse bg-indigo-400'
+                      : 'bg-slate-200')
+                }
+                title={getPersona(personaId).name}
+              />
+            ))}
+          </div>
+          <span className="ml-1 shrink-0 text-sm font-semibold text-slate-500">
             {personaIndex + 1} / {personaIds.length}
           </span>
         </div>
       </div>
 
-      {/* Chat log */}
+      {/* 반응형 채팅 로그 */}
       <div
         ref={scrollRef}
-        className="flex h-[420px] flex-col space-y-4 overflow-y-auto rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm"
+        aria-live="polite"
+        className="flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm sm:p-5"
       >
         {messages.map((message, index) => {
           const messagePersona = getPersona(message.personaId)
@@ -350,7 +351,7 @@ export default function SparScreen({
           if (message.role === 'answer') {
             return (
               <div key={index} className="flex justify-end">
-                <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-indigo-600 px-4 py-2.5 text-sm text-white shadow-sm">
+                <div className="max-w-[88%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-indigo-600 px-4 py-3 text-base leading-relaxed text-white shadow-sm sm:max-w-[80%]">
                   {message.text}
                 </div>
               </div>
@@ -365,33 +366,36 @@ export default function SparScreen({
 
             return (
               <div key={index} className="flex justify-center">
-                <div className="w-full max-w-[90%] space-y-2 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-xs leading-relaxed text-slate-600">
+                <div className="w-full max-w-[96%] space-y-3 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3.5 text-sm leading-relaxed text-slate-700 sm:max-w-[92%] sm:text-base">
                   <div className="whitespace-pre-wrap">{message.text}</div>
 
                   {message.answerStatus === 'unknown' && message.supplement && (
-                    <div className="rounded-lg border border-indigo-100 bg-white px-3 py-2.5">
-                      <div className="mb-1 text-[11px] font-bold text-indigo-600">
+                    <div className="rounded-lg border border-indigo-100 bg-white px-3.5 py-3">
+                      <div className="mb-1.5 text-sm font-bold text-indigo-700">
                         핵심 보충
                       </div>
-                      <div className="whitespace-pre-wrap text-slate-600">
+                      <div className="whitespace-pre-wrap text-slate-700">
                         {message.supplement}
                       </div>
                     </div>
                   )}
 
                   {message.answerStatus === 'unknown' && relatedSlides.length > 0 && (
-                    <div className="text-[11px] text-slate-500">
-                      관련 발표 자료: {relatedSlides.map((slide) => `${slide}번 슬라이드`).join(', ')}
+                    <div className="text-sm text-slate-600">
+                      관련 발표 자료:{' '}
+                      {relatedSlides
+                        .map((slide) => `${slide}번 슬라이드`)
+                        .join(', ')}
                     </div>
                   )}
 
                   {rubricEntries.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    <div className="flex flex-wrap gap-2 pt-0.5">
                       {rubricEntries.map(([axis, value]) => (
                         <span
                           key={axis}
                           className={
-                            'rounded-full px-2 py-0.5 text-[10px] font-semibold ' +
+                            'rounded-full px-2.5 py-1 text-xs font-semibold ' +
                             (value === '우수'
                               ? 'bg-emerald-50 text-emerald-700'
                               : value === '보통'
@@ -411,9 +415,11 @@ export default function SparScreen({
 
           return (
             <div key={index} className="flex justify-start">
-              <div className="max-w-[80%] rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm">
-                <div className="mb-1 flex items-center gap-1 text-xs font-bold text-indigo-600">
-                  <span>{messagePersona.emoji}</span>
+              <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-3 text-base leading-relaxed shadow-sm sm:max-w-[80%]">
+                <div className="mb-1.5 flex items-center gap-2 text-sm font-bold text-indigo-700">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-100 text-xs">
+                    {messagePersona.emoji}
+                  </span>
                   <span>{messagePersona.name}</span>
                 </div>
 
@@ -427,7 +433,7 @@ export default function SparScreen({
 
         {busy && (
           <div className="flex justify-start">
-            <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-400 shadow-sm">
+            <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-3 text-base text-slate-500 shadow-sm">
               생각 중…
               <div className="flex gap-1">
                 <span
@@ -449,33 +455,35 @@ export default function SparScreen({
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-2.5 text-sm text-rose-600">
+        <div className="shrink-0 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700">
           오류: {error}
         </div>
       )}
 
       {micError && !readyForReport && (
-        <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-2.5 text-sm text-rose-600">
+        <div className="shrink-0 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700">
           {micError}
         </div>
       )}
 
-      {/* Live dictation preview */}
+      {/* 실시간 받아쓰기 미리보기 */}
       {listening && !readyForReport && (
-        <div className="flex items-center gap-2 text-xs text-indigo-600">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 text-sm text-indigo-700">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-rose-500" />
-          받아쓰는 중…
-          <span className="text-slate-400">{interim || '(말해보세요)'}</span>
+          <span className="font-semibold">받아쓰는 중…</span>
+          <span className="min-w-0 text-slate-500">
+            {interim || '(말해 보세요)'}
+          </span>
         </div>
       )}
 
       {readyForReport ? (
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/60 px-5 py-4 shadow-sm">
+        <div className="flex shrink-0 flex-col gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <div className="text-sm font-bold text-slate-800">
+            <div className="text-base font-bold text-slate-800">
               모든 질의응답이 완료되었습니다.
             </div>
-            <div className="mt-1 text-xs text-slate-500">
+            <div className="mt-1 text-sm leading-relaxed text-slate-600">
               마지막 답변의 피드백을 확인한 뒤 종합 리포트로 이동해 주세요.
             </div>
           </div>
@@ -483,14 +491,14 @@ export default function SparScreen({
           <button
             type="button"
             onClick={openReport}
-            className="flex shrink-0 items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700"
+            className="flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-indigo-700"
           >
-종합 리포트 보기
+            종합 리포트 보기
           </button>
         </div>
       ) : (
-        /* Answer input */
-        <div className="flex gap-2 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-sm">
+        /* 답변 입력 영역 */
+        <div className="sticky bottom-0 z-10 flex shrink-0 gap-2 rounded-2xl border border-slate-200/80 bg-white/95 p-2.5 shadow-lg backdrop-blur sm:p-3">
           {sttSupported && (
             <button
               type="button"
@@ -499,16 +507,16 @@ export default function SparScreen({
               disabled={busy || !question}
               title={listening ? '받아쓰기 중지' : '음성으로 답변 (STT)'}
               className={
-                'flex h-auto w-12 shrink-0 items-center justify-center rounded-xl border transition disabled:cursor-not-allowed disabled:opacity-40 ' +
+                'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border transition disabled:cursor-not-allowed disabled:opacity-40 ' +
                 (listening
                   ? 'border-rose-300 bg-rose-50 text-rose-500'
-                  : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-indigo-400 hover:text-indigo-600')
+                  : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-indigo-400 hover:text-indigo-600')
               }
             >
               {listening ? (
                 <Square className="h-4 w-4 fill-current" />
               ) : (
-                <Mic className="h-4 w-4" />
+                <Mic className="h-5 w-5" />
               )}
             </button>
           )}
@@ -521,20 +529,21 @@ export default function SparScreen({
             rows={2}
             placeholder={
               sttSupported
-                ? '답변을 입력하거나 마이크 버튼으로 말하세요… (Ctrl/⌘ + Enter 로 전송)'
-                : '답변을 입력하세요… (Ctrl/⌘ + Enter 로 전송)'
+                ? '답변을 입력하거나 마이크로 말하세요. (Ctrl/⌘ + Enter 전송)'
+                : '답변을 입력하세요. (Ctrl/⌘ + Enter 전송)'
             }
-            className="flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-700 outline-none focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+            className="min-h-12 min-w-0 flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-base leading-relaxed text-slate-700 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 sm:px-4"
           />
 
           <button
             type="button"
             onClick={() => void submit()}
             disabled={busy || !question || !answer.trim()}
-            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-indigo-600 px-6 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="답변 전송"
+            className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-base font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 sm:px-6"
           >
-            <Send className="h-4 w-4" />
-            답변
+            <Send className="h-5 w-5" />
+            <span className="hidden sm:inline">답변</span>
           </button>
         </div>
       )}

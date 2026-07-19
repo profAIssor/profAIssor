@@ -41,7 +41,8 @@ const SAMPLE_SLIDES: Slide[] = [
 export default function SetupScreen({ onStart }: Props) {
   const [script, setScript] = useState('')
   const [slides, setSlides] = useState<Slide[]>([])
-  // 첫 연습은 중립적인 기본 평가자 한 명으로 수정
+
+  // 중립적인 기본 평가자 초기 선택
   const [selected, setSelected] = useState<PersonaId[]>(['standard'])
   const [difficulty, setDifficulty] = useState<Difficulty>('medium')
   const [maxTurns, setMaxTurns] = useState(2)
@@ -53,18 +54,22 @@ export default function SetupScreen({ onStart }: Props) {
     )
   }
 
-  const hasContent = script.trim().length > 0 || slides.some((s) => s.text.trim().length > 0)
+  const hasContent =
+    script.trim().length > 0 || slides.some((s) => s.text.trim().length > 0)
 
   const fillSample = () => {
-    if (hasContent && !window.confirm('입력한 대본/슬라이드가 예시 데이터로 대체됩니다. 계속할까요?')) {
+    if (
+      hasContent &&
+      !window.confirm('입력한 대본/슬라이드가 예시 데이터로 대체됩니다. 계속할까요?')
+    ) {
       return
     }
+
     setScript(SAMPLE_SCRIPT)
     setSlides(SAMPLE_SLIDES)
   }
 
-  // 대본/슬라이드 중 하나만 있어도 시작 가능 — 슬라이드만 올린 경우 슬라이드
-  // 내용을 근거로, 대본만 쓴 경우 대본만으로 질문을 생성한다 (prompts.py 참고).
+  // 대본 또는 슬라이드 단독 입력 지원
   const canStart = hasContent && selected.length > 0
 
   return (
@@ -79,7 +84,7 @@ export default function SetupScreen({ onStart }: Props) {
       </div>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
-        {/* Left column: script + slides */}
+        {/* 좌측 영역: 대본 및 슬라이드 */}
         <div className="space-y-6 lg:col-span-7">
           <div className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
             <div className="flex items-center justify-between gap-3">
@@ -98,6 +103,10 @@ export default function SetupScreen({ onStart }: Props) {
                 예시 데이터로 채우기
               </button>
             </div>
+            <p className="text-xs text-slate-400">
+              실제로 발표할 대본을 그대로 붙여넣으세요. AI 심사관이 이를 바탕으로
+              날카로운 꼬리 질문을 던집니다.
+            </p>
             <textarea
               id="script-textarea"
               value={script}
@@ -113,11 +122,15 @@ export default function SetupScreen({ onStart }: Props) {
               <Sparkles className="h-5 w-5 text-indigo-500" />
               발표자료 슬라이드 텍스트
             </label>
+            {/* 슬라이드 분석 목적 안내 재추가 */}
+            <p className="text-xs text-slate-400">
+              발표에서 빠진 슬라이드 내용을 함께 분석합니다.
+            </p>
             <SlideInput slides={slides} onChange={setSlides} />
           </div>
         </div>
 
-        {/* Right column: persona selection + CTA */}
+        {/* 우측 영역: 페르소나 선택 및 시작 버튼 */}
         <div className="space-y-6 lg:col-span-5">
           <div className="space-y-5 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
             <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-800">
@@ -125,9 +138,11 @@ export default function SetupScreen({ onStart }: Props) {
               청중 페르소나 선택
               <span className="text-xs font-normal text-slate-400">(1개 이상)</span>
             </h2>
+
             <div className="space-y-3">
               {PERSONAS.map((p) => {
                 const active = selected.includes(p.id)
+
                 return (
                   <button
                     key={p.id}
@@ -189,7 +204,6 @@ export default function SetupScreen({ onStart }: Props) {
               <span className="text-xs font-semibold text-slate-500">
                 최대 꼬리질문 횟수
               </span>
-
               <div className="flex items-center gap-3">
                 <button
                   type="button"
@@ -199,11 +213,9 @@ export default function SetupScreen({ onStart }: Props) {
                 >
                   −
                 </button>
-
                 <span className="w-6 text-center text-sm font-bold text-slate-800">
                   {maxTurns}
                 </span>
-
                 <button
                   type="button"
                   onClick={() => setMaxTurns((current) => Math.min(3, current + 1))}
@@ -213,6 +225,10 @@ export default function SetupScreen({ onStart }: Props) {
                   +
                 </button>
               </div>
+              {/* 꼬리질문 구성 안내 재추가 */}
+              <p className="text-xs leading-relaxed text-slate-400">
+                총 질문을 {maxTurns + 1}회 진행합니다.
+              </p>
             </div>
 
             <div className="space-y-2">
@@ -254,9 +270,12 @@ export default function SetupScreen({ onStart }: Props) {
           >
             스파링 시작 →
           </button>
+
           {!canStart && (
             <p className="text-center text-xs text-slate-400">
-              {!hasContent ? '발표 대본 또는 슬라이드 중 하나는 입력해야 시작할 수 있어요' : '청중 페르소나를 1개 이상 선택해주세요'}
+              {!hasContent
+                ? '발표 대본 또는 슬라이드 중 하나는 입력해야 시작할 수 있어요'
+                : '청중 페르소나를 1개 이상 선택해주세요'}
             </p>
           )}
         </div>
