@@ -167,14 +167,15 @@ function TurnCard({ index, turn }: { index: number; turn: TranscriptTurn }) {
 
       <p className="text-sm font-semibold text-slate-800">{turn.question}</p>
 
-      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
+      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-600">
         {turn.answer}
       </div>
 
-      <div className="space-y-1 text-xs leading-relaxed text-slate-600">
-        <div className="font-semibold text-slate-700">평가: {turn.verdict}</div>
-        <div>✅ {turn.strengths}</div>
-        <div>⚠️ {turn.gaps}</div>
+      <div className="space-y-1.5 rounded-lg bg-white/70 px-3 py-2 text-xs leading-relaxed text-slate-600">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">총평</div>
+        <p>{turn.verdict}</p>
+        <p>✅ {turn.strengths}</p>
+        <p>⚠️ {turn.gaps}</p>
       </div>
 
       {rubricEntries.length > 0 && (
