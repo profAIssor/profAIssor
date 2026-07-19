@@ -246,10 +246,13 @@ export default function SparScreen({
         question_type: currentQuestionType,
         answer: studentAnswer,
         verdict: evaluation.verdict,
+        strengths: evaluation.strengths,
         gaps: evaluation.gaps,
+        // 1-4: 답변 불가 흐름 정보 + main(PR#15): 상세 교정 카드용 rubric
         answer_status: evaluation.answer_status,
         supplement: evaluation.supplement,
         related_slides: evaluation.related_slides,
+        rubric: evaluation.rubric,
       })
 
       if (isFirstUnknown && evaluation.followup) {

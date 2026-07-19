@@ -1,5 +1,6 @@
 """FastAPI app: CORS + 3 routes (questions / evaluate / report)."""
 import logging
+import math
 import os
 import re
 from typing import Dict, List
@@ -590,23 +591,47 @@ def _word_count(text: str) -> int:
 
 
 def _keywords(text: str) -> List[str]:
-    """Extract candidate key terms (>=2 char alnum/Hangul tokens)."""
+    """Extract candidate key terms (>=2 char alnum/Hangul tokens).
+
+    Pure-digit tokens (slide page numbers like "02", "10") are never
+    meaningful content, so they're dropped unconditionally.
+    """
     tokens = re.findall(r"[A-Za-z0-9가-힣]{2,}", text)
     out = []
     for t in tokens:
+        if t.isdigit():
+            continue
         if t.lower() in _STOPWORDS:
             continue
         out.append(t)
     return out
 
 
-def _fallback_coverage(slide: Slide, script: str) -> SlideCoverage:
+def _boilerplate_tokens(slides: List[Slide]) -> set:
+    """Tokens repeated across most slides are deck-wide template chrome
+    (running headers, section labels like "KEY FINDING") rather than
+    slide-specific content, and shouldn't be checked for per-slide coverage.
+
+    Only kicks in for decks with enough slides to make "most slides" a
+    meaningful signal; small decks skip this entirely.
+    """
+    if len(slides) < 4:
+        return set()
+    doc_freq: Dict[str, int] = {}
+    for slide in slides:
+        for kw in {k.lower() for k in _keywords(slide.text)}:
+            doc_freq[kw] = doc_freq.get(kw, 0) + 1
+    threshold = max(3, math.ceil(len(slides) / 2))
+    return {kw for kw, freq in doc_freq.items() if freq >= threshold}
+
+
+def _fallback_coverage(slide: Slide, script: str, boilerplate: set) -> SlideCoverage:
     """Deterministic keyword-overlap coverage when the LLM didn't judge a slide.
 
     A slide is 'covered' if a reasonable share of its key terms appear in the
     spoken script. Otherwise report the first missing key term.
     """
-    kws = _keywords(slide.text)
+    kws = [k for k in _keywords(slide.text) if k.lower() not in boilerplate]
     if not kws:
         return SlideCoverage(index=slide.index, covered=True, missing_point=None)
     script_low = script.lower()
@@ -708,6 +733,7 @@ def report(req: ReportRequest):
             for s in sorted(req.slides, key=lambda s: s.index)
         ]
     else:
+        boilerplate = _boilerplate_tokens(req.slides)
         for slide in sorted(req.slides, key=lambda s: s.index):
             if slide.index in llm_cov:
                 c = llm_cov[slide.index]
@@ -723,7 +749,7 @@ def report(req: ReportRequest):
                     )
                 )
             else:
-                coverage.append(_fallback_coverage(slide, req.script))
+                coverage.append(_fallback_coverage(slide, req.script, boilerplate))
 
     valid_slide_indices = {slide.index for slide in req.slides}
     revisions = _parse_revisions(

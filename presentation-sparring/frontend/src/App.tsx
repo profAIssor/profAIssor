@@ -28,6 +28,7 @@ export default function App() {
   const [maxTurns, setMaxTurns] = useState(2)
   const [field, setField] = useState<AcademicField | null>(null)
   const [report, setReport] = useState<Report | null>(null)
+  const [transcript, setTranscript] = useState<TranscriptTurn[]>([])
   const [reportError, setReportError] = useState<string | null>(null)
   const [loadingReport, setLoadingReport] = useState(false)
 
@@ -48,12 +49,13 @@ export default function App() {
     setStage('spar')
   }
 
-  const handleFinish = async (transcript: TranscriptTurn[]) => {
+  const handleFinish = async (finishedTranscript: TranscriptTurn[]) => {
     setLoadingReport(true)
     setReportError(null)
+    setTranscript(finishedTranscript)
     setStage('report')
     try {
-      const r = await fetchReport(script, slides, transcript, field)
+      const r = await fetchReport(script, slides, finishedTranscript, field)
       setReport(r)
       saveSession({
         field,
@@ -71,6 +73,7 @@ export default function App() {
   const handleRestart = () => {
     setStage('setup')
     setReport(null)
+    setTranscript([])
     setReportError(null)
   }
 
@@ -177,7 +180,7 @@ export default function App() {
               </div>
             )}
             {!loadingReport && !reportError && report && (
-              <ReportScreen report={report} onRestart={handleRestart} />
+              <ReportScreen report={report} transcript={transcript} onRestart={handleRestart} />
             )}
           </>
         )}

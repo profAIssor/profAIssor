@@ -592,6 +592,8 @@ def build_report_prompt(
         "전달은 텍스트의 명확성·용어 설명·설명 순서, "
         "대응은 질문 이해·직접성·근거 제시를 평가합니다. "
         "음성 정보가 없으므로 속도, 억양, 음량, 자신감, 긴장 상태를 추측하지 마세요. "
+        "질문별 상세 교정은 별도 화면에 이미 표시되므로, "
+        "content_feedback/delivery_feedback/response_feedback은 각각 2문장 이내로 핵심만 간결하게 요약하세요. "
         "슬라이드 핵심이 대본에서 의미 있게 설명됐을 때만 covered=true로 두세요.\n"
         f"{_REVISION_ACTION_GUIDE}\n"
         "[revisions 작성 순서]\n"

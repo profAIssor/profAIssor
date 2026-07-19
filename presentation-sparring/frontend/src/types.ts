@@ -50,10 +50,14 @@ export interface TranscriptTurn {
   question_type?: QuestionType
   answer: string
   verdict: string
+  strengths: string
   gaps: string
+  // 1-4: 답변 불가 흐름용 필드 (unknown 턴의 보충 힌트 표시)
   answer_status?: AnswerStatus
   supplement?: string | null
   related_slides?: number[]
+  // main(PR#15): 답변별 상세 교정 카드에서 rubric 표시
+  rubric: Record<string, string>
 }
 
 export interface SlideExtractResponse {

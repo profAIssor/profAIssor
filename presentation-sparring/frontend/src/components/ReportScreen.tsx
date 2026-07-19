@@ -1,14 +1,16 @@
-import { Brain, Lightbulb, ListChecks, Mic, RotateCcw, Shield, Target } from 'lucide-react'
+import { Brain, Lightbulb, ListChecks, MessageSquareText, Mic, RotateCcw, Shield, Target } from 'lucide-react'
 import { coverageRate } from '../lib/coverage'
 import { loadSessions } from '../lib/sessionStore'
-import type { Report, RevisionActionType } from '../types'
+import { getPersona } from '../personas'
+import type { Report, RevisionActionType, TranscriptTurn } from '../types'
 
 interface Props {
   report: Report
+  transcript: TranscriptTurn[]
   onRestart: () => void
 }
 
-export default function ReportScreen({ report, onRestart }: Props) {
+export default function ReportScreen({ report, transcript, onRestart }: Props) {
   // Rough speaking-rate estimate: assume ~120 어절/분 delivery pace.
   const estMinutes = report.word_count > 0 ? (report.word_count / 120).toFixed(1) : '0'
   const uncovered = report.slide_coverage.filter((s) => !s.covered)
@@ -31,16 +33,27 @@ export default function ReportScreen({ report, onRestart }: Props) {
         </span>
         <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-slate-900">📋 피드백 리포트</h1>
         <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-500">
-          스파링 세션을 종합한 결과입니다. 아래에서 내용·전달·대응 분석과 슬라이드 커버리지를 확인하세요.
+          질문마다 어떻게 답했는지, 무엇을 보완하면 좋을지 아래에서 하나씩 확인하세요.
         </p>
       </div>
 
-      {/* axis feedback */}
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card icon={<Brain className="h-5 w-5 text-indigo-500" />} title="내용" body={report.content_feedback} />
-        <Card icon={<Mic className="h-5 w-5 text-indigo-500" />} title="전달" body={report.delivery_feedback} />
-        <Card icon={<Shield className="h-5 w-5 text-indigo-500" />} title="대응" body={report.response_feedback} />
-      </div>
+      {/* per-turn detail — the main content of the report */}
+      <section className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
+        <h2 className="flex items-center gap-2 text-lg font-bold text-slate-800">
+          <MessageSquareText className="h-5 w-5 text-indigo-600" />
+          답변별 상세 교정
+        </h2>
+
+        {transcript.length === 0 ? (
+          <p className="text-sm text-slate-400">기록된 질의응답이 없습니다.</p>
+        ) : (
+          <div className="space-y-3">
+            {transcript.map((turn, i) => (
+              <TurnCard key={i} index={i} turn={turn} />
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* slide coverage — the killer feature */}
       <section className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
@@ -85,7 +98,8 @@ export default function ReportScreen({ report, onRestart }: Props) {
         </div>
       </section>
 
-      {/* concrete revision suggestions — 1-4C */}
+      {/* concrete revision suggestions — 1-4C
+          답변별 상세 교정(과거 기록)과 달리 앞으로의 대본 교정안이므로 별도 유지 */}
       {report.revisions && report.revisions.length > 0 && (
         <section className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
           <h2 className="flex items-center gap-2 text-lg font-bold text-slate-800">
@@ -142,6 +156,14 @@ export default function ReportScreen({ report, onRestart }: Props) {
         </div>
       )}
 
+      {/* condensed axis summary — main(PR#15): 상세 교정이 메인이므로 축약 표시 */}
+      <section className="space-y-2.5 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm">
+        <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">종합 요약</h2>
+        <SummaryRow icon={<Brain className="h-4 w-4 text-indigo-500" />} label="내용" body={report.content_feedback} />
+        <SummaryRow icon={<Mic className="h-4 w-4 text-indigo-500" />} label="전달" body={report.delivery_feedback} />
+        <SummaryRow icon={<Shield className="h-4 w-4 text-indigo-500" />} label="대응" body={report.response_feedback} />
+      </section>
+
       {/* delivery metrics */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Metric
@@ -185,14 +207,62 @@ const ACTION_TYPE_LABEL: Record<RevisionActionType, string> = {
   other: '수정 제안',
 }
 
-function Card({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
+function SummaryRow({ icon, label, body }: { icon: React.ReactNode; label: string; body: string }) {
   return (
-    <div className="space-y-2 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
-      <div className="flex items-center gap-2 text-sm font-bold text-slate-800">
+    <div className="flex items-start gap-2.5 text-sm">
+      <span className="mt-0.5 flex w-14 shrink-0 items-center gap-1.5 whitespace-nowrap font-bold text-slate-700">
         {icon}
-        {title}
+        {label}
+      </span>
+      <p className="flex-1 leading-relaxed text-slate-600">{body || '—'}</p>
+    </div>
+  )
+}
+
+function TurnCard({ index, turn }: { index: number; turn: TranscriptTurn }) {
+  const persona = getPersona(turn.persona_id)
+  const rubricEntries = Object.entries(turn.rubric ?? {})
+
+  return (
+    <div className="space-y-2.5 rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
+      <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-600">
+        <span>{persona.emoji}</span>
+        {persona.name}
+        <span className="font-normal text-slate-400">· {index + 1}번째 질문</span>
       </div>
-      <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-600">{body || '—'}</p>
+
+      <p className="text-sm font-semibold text-slate-800">{turn.question}</p>
+
+      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-600">
+        {turn.answer}
+      </div>
+
+      <div className="space-y-1.5 rounded-lg bg-white/70 px-3 py-2 text-xs leading-relaxed text-slate-600">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">총평</div>
+        <p>{turn.verdict}</p>
+        <p>✅ {turn.strengths}</p>
+        <p>⚠️ {turn.gaps}</p>
+      </div>
+
+      {rubricEntries.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
+          {rubricEntries.map(([axis, value]) => (
+            <span
+              key={axis}
+              className={
+                'rounded-full px-2 py-0.5 text-[10px] font-semibold ' +
+                (value === '우수'
+                  ? 'bg-emerald-50 text-emerald-700'
+                  : value === '보통'
+                    ? 'bg-amber-50 text-amber-700'
+                    : 'bg-rose-50 text-rose-700')
+              }
+            >
+              {axis} {value}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
