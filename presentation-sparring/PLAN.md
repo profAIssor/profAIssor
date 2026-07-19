@@ -82,8 +82,8 @@ Step 0-1에서 OpenAI 연동과 프로덕션 기본값 전환을 완료했고, S
 
 ### Step 1-1: 난이도/최대턴수/rubric — 백엔드
 - 파일: `backend/schemas.py`, `backend/prompts.py`, `backend/main.py`
-- 작업: `QuestionRequest.difficulty`(easy/medium/hard, 기본 medium), `EvaluateRequest.max_turns`(0~5, 기본 2) 추가. `build_question_prompt`가 난이도별 톤 지시 추가, `build_evaluate_prompt`의 `turn < 2` 하드코딩을 `turn < max_turns`로 교체, `EvaluateResponse.rubric` 추가. `main.py`의 `req.turn >= 2` 하드가드를 `req.turn >= req.max_turns`로 교체.
-- 완료 기준: `max_turns=0`/`5` 경계값 curl 테스트에서 꼬리질문 로직이 정확히 동작
+- 작업: `QuestionRequest.difficulty`(easy/medium/hard, 기본 medium), `EvaluateRequest.max_turns`(기본 2; 최초 0~5로 설계했으나 Step 1-4에서 0~3으로 확정) 추가. `build_question_prompt`가 난이도별 톤 지시 추가, `build_evaluate_prompt`의 `turn < 2` 하드코딩을 `turn < max_turns`로 교체, `EvaluateResponse.rubric` 추가. `main.py`의 `req.turn >= 2` 하드가드를 `req.turn >= req.max_turns`로 교체.
+- 완료 기준: `max_turns=0`/`3` 경계값 curl 테스트에서 꼬리질문 로직이 정확히 동작
 - 의존성: 없음 (Step 1-2와 병렬 가능)
 
 ### Step 1-2: 전공계열별 페르소나 — 백엔드

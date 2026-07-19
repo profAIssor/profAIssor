@@ -35,7 +35,15 @@ export default function SparScreen({
   onFinish,
 }: Props) {
   const [personaIndex, setPersonaIndex] = useState(0)
+
+  // turn은 "현재 root 질문 안에서 진행된 꼬리질문 횟수"만 뜻하며,
+  // 새 root 질문이 시작되면 항상 0으로 리셋된다.
   const [turn, setTurn] = useState(0)
+
+  // 답변 불가로 소진된 질문 교체 횟수. persona별 공유 예산(maxTurns)에서
+  // 차감되며, turn과 분리해 새 질문의 유형 전환(turn=0 규칙)이 막히지 않게 한다.
+  const [skipsUsed, setSkipsUsed] = useState(0)
+
   const [question, setQuestion] = useState<string | null>(null)
   const [rootQuestion, setRootQuestion] = useState<string | null>(null)
 
@@ -169,6 +177,10 @@ export default function SparScreen({
     const firstQuestionType = rootQuestionType ?? questionType ?? 'definition'
     const currentQuestionType = questionType ?? firstQuestionType
     const currentTurn = turn
+    const currentSkips = skipsUsed
+
+    // 답변 불가로 이미 소진된 횟수를 뺀 값이 현재 질문의 실제 꼬리질문 예산
+    const remainingMaxTurns = Math.max(0, maxTurns - currentSkips)
     const studentAnswer = answer.trim()
 
     setBusy(true)
@@ -195,7 +207,7 @@ export default function SparScreen({
         expectedAnswerPoints,
         answer: studentAnswer,
         turn: currentTurn,
-        maxTurns,
+        maxTurns: remainingMaxTurns,
         difficulty,
         field,
         termHints: termDict,
@@ -227,9 +239,12 @@ export default function SparScreen({
         related_slides: evaluation.related_slides,
       })
 
-      if (isUnknown && currentTurn < maxTurns) {
-        // 답변 불가 후 새 핵심 질문 전환
-        setTurn(currentTurn + 1)
+      if (isUnknown && currentSkips < maxTurns) {
+        // 답변 불가 후 새 핵심 질문 전환.
+        // 소진 횟수는 skipsUsed로만 기록하고 turn은 0으로 리셋해,
+        // 새 root 질문에서도 첫 꼬리질문 유형 전환(turn=0 규칙)이 가능하게 한다.
+        setSkipsUsed(currentSkips + 1)
+        setTurn(0)
         setQuestion(null)
         setRootQuestion(null)
         setRootQuestionType(null)
@@ -268,6 +283,8 @@ export default function SparScreen({
       if (nextPersonaIndex < personaIds.length) {
         setPersonaIndex(nextPersonaIndex)
         setTurn(0)
+        // 답변 불가 예산은 persona 단위이므로 함께 리셋
+        setSkipsUsed(0)
         setQuestion(null)
         setRootQuestion(null)
         setRootQuestionType(null)

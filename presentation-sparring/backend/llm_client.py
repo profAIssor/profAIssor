@@ -37,6 +37,28 @@ _TIMEOUT = 60
 # Uvicorn 로그 형식을 그대로 사용
 _logger = logging.getLogger("uvicorn.error")
 
+# 호출 목적별 출력 토큰 상한.
+# question/evaluate는 응답 JSON 스키마가 고정이라 짧게 제한하고,
+# report는 슬라이드 커버리지 배열이 슬라이드 수에 비례해 길어지므로 여유를 둔다.
+# 출력 상한은 비용 통제와 '잘린 JSON → 파싱 실패' 방지를 겸한다.
+_MAX_OUTPUT_TOKENS = {
+    "question": 500,
+    "evaluate": 800,
+    "report": 2048,
+    "chat": 1024,
+}
+
+
+def _sampling_config(request_kind: str) -> tuple[float, int]:
+    """호출 목적별 (temperature, max_output_tokens)를 반환.
+
+    평가는 같은 답변에 같은 판정이 나와야 하므로 온도를 낮추고(0.3),
+    질문 생성과 리포트는 표현이 매번 똑같이 반복되지 않도록 0.7을 유지한다.
+    """
+    temperature = 0.3 if request_kind == "evaluate" else 0.7
+    max_tokens = _MAX_OUTPUT_TOKENS.get(request_kind, _MAX_OUTPUT_TOKENS["chat"])
+    return temperature, max_tokens
+
 # 로컬·배포 환경에서 필요에 따라 토큰 로그를 끌 수 있게
 _USAGE_LOG_ENABLED = os.getenv(
     "LLM_USAGE_LOG",
@@ -102,6 +124,9 @@ def _call_openai(system: str, user: str, model: str) -> str:
 
     started_at = time.perf_counter()
 
+    request_kind = _detect_request_kind(system)
+    temperature, max_tokens = _sampling_config(request_kind)
+
     response = requests.post(
         _MODEL_CONFIG["openai"]["url"],
         headers={
@@ -114,7 +139,11 @@ def _call_openai(system: str, user: str, model: str) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.3,
+            # 평가 0.3 / 질문·리포트 0.7 — 판정 일관성과 질문 다양성을 분리
+            "temperature": temperature,
+
+            # 잘린 JSON 파싱 실패와 비용 폭주를 동시에 방지
+            "max_tokens": max_tokens,
 
             # JSON 객체 출력 강제
             "response_format": {"type": "json_object"},
@@ -130,7 +159,7 @@ def _call_openai(system: str, user: str, model: str) -> str:
     _log_usage(
         provider="openai",
         model=model,
-        request_kind=_detect_request_kind(system),
+        request_kind=request_kind,
         input_tokens=int(usage.get("prompt_tokens", 0)),
         output_tokens=int(usage.get("completion_tokens", 0)),
         total_tokens=int(usage.get("total_tokens", 0)),
@@ -151,6 +180,9 @@ def _call_gemini(system: str, user: str, model: str) -> str:
         f"{model}:generateContent?key={api_key}"
     )
 
+    request_kind = _detect_request_kind(system)
+    temperature, max_tokens = _sampling_config(request_kind)
+
     response = requests.post(
         url,
         headers={"Content-Type": "application/json"},
@@ -165,8 +197,12 @@ def _call_gemini(system: str, user: str, model: str) -> str:
                 }
             ],
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 1024,
+                "temperature": temperature,
+                # 고정 1024는 슬라이드가 많은 리포트에서 JSON이 잘릴 수 있어
+                # 호출 목적별 상한으로 교체
+                "maxOutputTokens": max_tokens,
+                # OpenAI의 response_format과 같은 목적: JSON 외 텍스트 차단
+                "responseMimeType": "application/json",
             },
         },
         timeout=_TIMEOUT,
@@ -298,12 +334,50 @@ def _mock_question(system: str, user: str) -> dict:
     }
 
 
+def _is_mock_answer_sufficient(user: str) -> bool:
+    """기대 답변 요소의 핵심 토큰이 답변에 충분히 등장하면 충분한 답변으로 판정.
+
+    실제 LLM의 '답변이 질문의 명시적 요구를 모두 충족하면 followup=null' 흐름을
+    API 키 없이도 검증할 수 있게 하는 결정론적 근사이다.
+    각 기대 요소에서 2글자 이상 토큰을 뽑아, 모든 요소가 답변에서
+    최소 한 토큰 이상 발견되면 충분으로 본다.
+    """
+    answer = _extract_section(user, "학생 답변")
+    expected = _extract_section(user, "기대 답변 요소")
+
+    points = [
+        line.lstrip("- ").strip()
+        for line in expected.splitlines()
+        if line.strip().startswith("-")
+    ]
+
+    if not points or not answer:
+        return False
+
+    for point in points:
+        tokens = re.findall(r"[A-Za-z0-9가-힣]{2,}", point)
+        if not tokens:
+            continue
+        if not any(token in answer for token in tokens):
+            return False
+
+    return True
+
+
 def _mock_followup(user: str) -> tuple[Optional[str], Optional[str]]:
     """중복을 피하고 첫 꼬리질문에서만 인접 유형으로 전환"""
     turn_match = re.search(r"turn=(\d+)", user)
     turn = int(turn_match.group(1)) if turn_match else 0
 
-    if turn >= 3:
+    # 서버 하드가드와 별개로 mock 자체도 남은 횟수를 존중한다.
+    max_turns_match = re.search(r"max_turns=(\d+)", user)
+    max_turns = int(max_turns_match.group(1)) if max_turns_match else 3
+
+    if turn >= max_turns:
+        return None, None
+
+    # 충분한 답변이면 남은 횟수와 관계없이 종료한다 (1-4 확인 항목 검증용).
+    if _is_mock_answer_sufficient(user):
         return None, None
 
     question_type = _extract_section(user, "현재 질문 유형")
@@ -382,6 +456,29 @@ def _call_mock(system: str, user: str, model: str) -> str:
             )
 
         followup, followup_question_type = _mock_followup(user)
+
+        # 충분한 답변으로 종료된 경우에는 verdict와 rubric도 충분 상태로 맞춰
+        # '충분 → followup=null → 다음 persona 이동' 흐름을 그대로 재현한다.
+        if followup is None and _is_mock_answer_sufficient(user):
+            return json.dumps(
+                {
+                    "answer_status": "answered",
+                    "verdict": "충분",
+                    "strengths": "질문이 요구한 핵심 요소를 모두 답변에 포함했습니다.",
+                    "gaps": "없음",
+                    "supplement": None,
+                    "related_slides": [],
+                    "followup": None,
+                    "followup_question_type": None,
+                    "rubric": {
+                        "직접성": "우수",
+                        "근거": "보통",
+                        "논리": "보통",
+                    },
+                },
+                ensure_ascii=False,
+            )
+
         return json.dumps(
             {
                 "answer_status": "answered",
