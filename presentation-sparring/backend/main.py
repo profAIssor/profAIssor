@@ -625,11 +625,53 @@ def _boilerplate_tokens(slides: List[Slide]) -> set:
     return {kw for kw, freq in doc_freq.items() if freq >= threshold}
 
 
+# Percentages, decimals, and multi-digit numbers — the data points an
+# audience most notices when they go unmentioned. Bare single digits
+# (often list/page markers) are excluded to avoid noise.
+_FIGURE_PATTERN = re.compile(r"\d[\d,]*(?:\.\d+)?%?")
+
+
+def _figures(text: str) -> List[str]:
+    """Extract salient numeric figures from slide text.
+
+    Keeps percentages and decimals, and multi-digit integers that don't look
+    like page/section markers (a leading zero — "02", "07" — is treated as a
+    marker and dropped).
+    """
+    out = []
+    for raw in _FIGURE_PATTERN.findall(text):
+        fig = raw.strip(",")
+        core = fig.rstrip("%").replace(",", "")
+        if not core:
+            continue
+        if "%" in fig or "." in core:
+            out.append(fig)
+        elif len(core) >= 2 and not core.startswith("0"):
+            out.append(fig)
+    return out
+
+
+def _figure_rank(fig: str) -> int:
+    """Order figures by how likely they are the slide's headline number:
+    percentages first, then decimals, then plain counts, with year-like
+    4-digit numbers (1900–2099) pushed last so "45%" wins over "2023"."""
+    if "%" in fig:
+        return 0
+    if "." in fig:
+        return 1
+    core = fig.replace(",", "")
+    if len(core) == 4 and core.isdigit() and 1900 <= int(core) <= 2099:
+        return 3
+    return 2
+
+
 def _fallback_coverage(slide: Slide, script: str, boilerplate: set) -> SlideCoverage:
     """Deterministic keyword-overlap coverage when the LLM didn't judge a slide.
 
     A slide is 'covered' if a reasonable share of its key terms appear in the
-    spoken script. Otherwise report the first missing key term.
+    spoken script. Otherwise the missing point names the missing category —
+    a key figure (수치) when a slide number/percent went unspoken, else a key
+    term (용어) — so the feedback points at something concrete.
     """
     kws = [k for k in _keywords(slide.text) if k.lower() not in boilerplate]
     if not kws:
@@ -640,9 +682,16 @@ def _fallback_coverage(slide: Slide, script: str, boilerplate: set) -> SlideCove
     covered = covered_ratio >= 0.5 and len(missing) < len(kws)
     missing_point = None
     if not covered:
-        missing_point = (
-            f"'{', '.join(dict.fromkeys(missing))[:60]}' 관련 핵심 내용이 대본에서 언급되지 않았습니다."
-        )
+        script_digits = re.sub(r"[,\s]", "", script)
+        missing_figs = [
+            f for f in _figures(slide.text) if f.rstrip("%").replace(",", "") not in script_digits
+        ]
+        if missing_figs:
+            missing_figs.sort(key=_figure_rank)
+            missing_point = f"핵심 수치({missing_figs[0]})가 대본에서 언급되지 않았습니다."
+        else:
+            example = ", ".join(dict.fromkeys(missing))[:60]
+            missing_point = f"핵심 용어({example})가 대본에서 언급되지 않았습니다."
     return SlideCoverage(index=slide.index, covered=covered, missing_point=missing_point)
 
 
