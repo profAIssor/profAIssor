@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import re
+from difflib import SequenceMatcher
 from typing import Dict, List
 
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 import llm_client
+import material_context
 import pdf_extract
 import ppt_extract
 import prompts
@@ -86,13 +88,27 @@ async def extract_slides_endpoint(file: UploadFile = File(...)):
             detail="구버전 .ppt 파일은 지원하지 않습니다. PowerPoint에서 .pptx로 저장 후 업로드해주세요.",
         )
     if ext not in _UPLOAD_CONTENT_TYPES:
-        raise HTTPException(status_code=400, detail=_UNSUPPORTED_FORMAT_DETAIL)
-    if file.content_type and file.content_type not in _UPLOAD_CONTENT_TYPES[ext]:
-        raise HTTPException(status_code=400, detail=_UNSUPPORTED_FORMAT_DETAIL)
+        raise HTTPException(
+            status_code=400,
+            detail=_UNSUPPORTED_FORMAT_DETAIL,
+        )
 
+    # 브라우저·운영체제별 MIME 차이를 고려한 실제 파일 데이터 읽기
     content = await file.read()
+
+    # 빈 파일 업로드 방지
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail="업로드된 파일의 내용이 비어 있습니다.",
+        )
+
+    # 업로드 파일 크기 제한
     if len(content) > _MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=400, detail="파일 크기가 20MB를 초과합니다.")
+        raise HTTPException(
+            status_code=400,
+            detail="파일 크기가 20MB를 초과합니다.",
+        )
 
     extractor = pdf_extract if ext == "pdf" else ppt_extract
     label = "PDF" if ext == "pdf" else "PPT"
@@ -215,33 +231,142 @@ def _allowed_followup_types(
     return allowed
 
 
+_QUESTION_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9가-힣]{2,}")
+_QUESTION_STOPWORDS = {
+    "무엇인가요",
+    "설명해",
+    "주세요",
+    "말씀해",
+    "어떻게",
+    "이유는",
+    "근거는",
+    "관련",
+    "대해서",
+    "자료",
+    "발표",
+}
+
+
+def _normalize_question_text(question: str) -> str:
+    """질문 중복 비교용 문자열 정규화."""
+    normalized = re.sub(r"\s+", " ", question or "").strip().lower()
+    return re.sub(r"[^a-z0-9가-힣]", "", normalized)
+
+
+def _question_tokens(question: str) -> set[str]:
+    """질문 중복 비교용 핵심 토큰 추출."""
+    return {
+        token.lower()
+        for token in _QUESTION_TOKEN_PATTERN.findall(question or "")
+        if token.lower() not in _QUESTION_STOPWORDS
+    }
+
+
+def _question_similarity(left: str, right: str) -> float:
+    """문자열 형태와 핵심 토큰을 함께 사용한 질문 유사도 계산."""
+    left_normalized = _normalize_question_text(left)
+    right_normalized = _normalize_question_text(right)
+    if not left_normalized or not right_normalized:
+        return 0.0
+    if left_normalized == right_normalized:
+        return 1.0
+
+    character_score = SequenceMatcher(
+        None,
+        left_normalized,
+        right_normalized,
+    ).ratio()
+    left_tokens = _question_tokens(left)
+    right_tokens = _question_tokens(right)
+    token_score = 0.0
+    if left_tokens and right_tokens:
+        token_score = len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+    return max(character_score, token_score)
+
+
+def _is_duplicate_question(
+    candidate: str,
+    previous_questions: List[str],
+    *,
+    threshold: float = 0.72,
+) -> bool:
+    """이전 질문과 동일하거나 지나치게 유사한 질문 판정."""
+    return any(
+        _question_similarity(candidate, previous) >= threshold
+        for previous in previous_questions
+        if previous.strip()
+    )
+
+
+def _generate_question_data(
+    req: QuestionRequest,
+    *,
+    persona_system: str,
+    question_type_priority: List[str],
+) -> dict:
+    """슬라이드-대본 내부 매칭과 중복 재생성을 적용한 질문 데이터 생성."""
+    prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
+    prompt_script = material_context.compact_script(req.script)
+    blocked_questions = [
+        question.strip()
+        for question in req.excluded_questions
+        if isinstance(question, str) and question.strip()
+    ]
+    last_data: dict = {}
+
+    for attempt in range(3):
+        system, user = prompts.build_question_prompt(
+            persona_system=persona_system,
+            script=prompt_script,
+            slides=prompt_slides,
+            difficulty=req.difficulty,
+            question_type_priority=question_type_priority,
+            excluded_questions=blocked_questions,
+        )
+        if attempt > 0:
+            user += (
+                "\n\n[중복 질문 재생성 지시]\n"
+                "직전에 생성한 질문이 이전 질문과 지나치게 유사했습니다. "
+                "이미 사용한 질문과 다른 슬라이드, 다른 핵심 쟁점 또는 다른 평가 관점을 "
+                "선택해 완전히 새로운 질문을 생성하세요."
+            )
+
+        try:
+            last_data = llm_client.chat_json(
+                system,
+                user,
+                get_model_hint(req.persona_id),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM call failed in /api/questions")
+            raise HTTPException(
+                status_code=502,
+                detail="AI 질문 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+            )
+
+        candidate = str(last_data.get("question", "")).strip()
+        if candidate and not _is_duplicate_question(candidate, blocked_questions):
+            return last_data
+        if candidate:
+            blocked_questions.append(candidate)
+
+    raise HTTPException(
+        status_code=502,
+        detail="AI가 이전 질문과 다른 질문을 생성하지 못했습니다. 잠시 후 다시 시도해주세요.",
+    )
+
+
 @app.post("/api/questions", response_model=QuestionResponse)
 def questions(req: QuestionRequest):
     persona = get_persona(req.persona_id)
     persona_system = persona["system"] + get_field_hint(req.field)
-    question_type_priority = get_question_type_priority(req.persona_id)
-
-    system, user = prompts.build_question_prompt(
+    question_type_priority = list(get_question_type_priority(req.persona_id))
+    data = _generate_question_data(
+        req,
         persona_system=persona_system,
-        script=req.script,
-        slides=req.slides,
-        difficulty=req.difficulty,
         question_type_priority=question_type_priority,
-        excluded_questions=req.excluded_questions,
     )
-
-    try:
-        data = llm_client.chat_json(
-            system,
-            user,
-            get_model_hint(req.persona_id),
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("LLM call failed in /api/questions")
-        raise HTTPException(
-            status_code=502,
-            detail="AI 질문 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
-        )
 
     valid_slide_indices = {slide.index for slide in req.slides}
     targets = data.get("targets_slide")
@@ -252,7 +377,7 @@ def questions(req: QuestionRequest):
     if not isinstance(targets, int) or targets not in valid_slide_indices:
         targets = None
 
-    # LLM 응답이 잘못되거나 누락되면 persona의 첫 번째 우선 유형을 사용합니다.
+    # LLM 응답 누락 시 페르소나의 첫 번째 우선 유형 적용
     question_type = _parse_question_type(
         data.get("question_type"),
         question_type_priority[0],
@@ -271,6 +396,12 @@ def questions(req: QuestionRequest):
     )
 
     question = str(data.get("question", "")).strip()
+    if not question:
+        raise HTTPException(
+            status_code=502,
+            detail="AI가 유효한 질문을 생성하지 못했습니다. 잠시 후 다시 시도해주세요.",
+        )
+
     question_focus = str(data.get("question_focus", "")).strip()
 
     return QuestionResponse(
@@ -330,109 +461,342 @@ def _is_no_answer(answer: str) -> bool:
     return bool(_NO_ANSWER_PATTERN.fullmatch(normalized))
 
 
-def _fallback_supplement(expected_points: List[str]) -> str:
-    """LLM 보충 문장이 비어 있을 때 내부 기대 요소로 짧은 힌트를 만듭니다."""
-    points = [point.strip() for point in expected_points if point.strip()][:2]
-    if points:
-        return (
-            "핵심 확인 항목은 "
-            + ", ".join(points)
-            + "입니다. 발표 자료에서 각 항목의 의미와 연결 관계를 다시 정리해 보세요."
-        )
-
-    return "질문의 핵심 개념과 비교 기준을 발표 자료에서 다시 확인해 보세요."
+def _next_action_after_current_question(req: EvaluateRequest) -> str:
+    """현재 질문 슬롯 종료 뒤 다음 기본 질문 또는 전체 종료 결정."""
+    return "move_to_new_root" if req.turn < req.max_turns else "finish"
 
 
-def _fallback_unknown_retry(question_focus: str) -> str:
-    """LLM 재질문이 비어 있을 때 같은 주제를 더 쉽게 묻는 문장 생성."""
+def _fallback_supplement(question_focus: str, current_type: QuestionType) -> str:
+    """모델 보충 설명 누락 시 사용할 사고 방향 안내."""
     focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
+    subject = focus or "현재 질문의 핵심 개념"
+    type_guides: Dict[QuestionType, str] = {
+        "definition": (
+            "익숙한 용어를 그대로 반복하기보다, 그 개념이 어떤 역할을 하고 "
+            "비슷한 개념과 무엇이 다른지부터 떠올려 보세요."
+        ),
+        "evidence": (
+            "결론을 먼저 외우기보다, 발표 자료에서 원인과 결과를 연결해 주는 "
+            "사실이나 수치를 한 가지 찾아보세요."
+        ),
+        "counterexample": (
+            "설명이 항상 성립한다고 가정하지 말고, 조건이 달라졌을 때 "
+            "결과가 바뀌는 지점을 먼저 생각해 보세요."
+        ),
+        "application": (
+            "새로운 상황의 정답을 바로 고르기보다, 원래 설명에서 사용할 수 있는 "
+            "판단 기준 한 가지를 먼저 꺼내 보세요."
+        ),
+    }
+    return f"이 질문은 {subject}을 한 번에 설명하도록 요구합니다. {type_guides[current_type]}"
 
-    if focus:
-        return (
-            f"힌트를 바탕으로, {focus}에서 가장 기본이 되는 의미나 관계 한 가지만 "
-            "말씀해 주실 수 있나요?"
+
+def _fallback_unknown_retry(
+    question_focus: str,
+    current_type: QuestionType,
+) -> tuple[str, str, List[str]]:
+    """현재 질문의 사고 단계를 한 단계 낮춘 재질문 계약 생성."""
+    focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
+    subject = focus or "현재 질문의 핵심 내용"
+    templates: Dict[QuestionType, tuple[str, str, List[str]]] = {
+        "definition": (
+            f"{subject}이 실제로 하는 역할 한 가지를 먼저 설명해 주실 수 있나요?",
+            f"{subject}의 핵심 역할 확인",
+            ["개념이 수행하는 역할 한 가지", "비슷한 개념과 구분되는 특징 한 가지"],
+        ),
+        "evidence": (
+            f"{subject}에 대해 원인과 결과를 이어 주는 자료 속 단서 한 가지는 무엇인가요?",
+            f"{subject}의 원인과 결과를 잇는 근거 확인",
+            ["발표 자료에 제시된 근거 한 가지", "그 근거가 결론과 연결되는 이유"],
+        ),
+        "counterexample": (
+            f"{subject}에 관한 설명이 달라질 수 있는 조건 한 가지를 먼저 떠올려 주실 수 있나요?",
+            f"{subject}이 달라지는 조건 확인",
+            ["설명이 달라질 수 있는 조건 한 가지", "그 조건에서 달라지는 결과"],
+        ),
+        "application": (
+            f"{subject}을 판단할 때 사용할 수 있는 기준 한 가지는 무엇인가요?",
+            f"{subject}에 적용할 판단 기준 확인",
+            ["원래 설명에서 가져온 판단 기준 한 가지", "그 기준이 현재 상황과 연결되는 이유"],
+        ),
+    }
+    return templates[current_type]
+
+
+def _is_trivial_definition_retry(question: str, current_type: QuestionType) -> bool:
+    """비정의형 질문이 단순 용어 정의로 후퇴한 경우 판정."""
+    if current_type == "definition":
+        return False
+    normalized = re.sub(r"\s+", " ", question.strip())
+    return bool(
+        re.fullmatch(
+            r".{1,60}(?:이란|란)\s*무엇인가요[?？]?",
+            normalized,
         )
+        or re.fullmatch(
+            r".{1,60}(?:의\s*)?(?:뜻|정의)는\s*무엇인가요[?？]?",
+            normalized,
+        )
+    )
 
-    return (
-        "힌트를 바탕으로, 원래 질문과 관련된 가장 기본적인 내용 한 가지만 "
-        "말씀해 주실 수 있나요?"
+
+def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
+    """무응답 문장을 제외한 사고 지원 설명과 무료 재질문 생성."""
+    current_type = req.question_type or req.root_question_type or "definition"
+    prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
+    selected_slides = material_context.select_context_slides(
+        prompt_slides,
+        req.context_slides,
+        query=req.question_focus or req.question,
+    )
+    slide_context = "\n\n".join(
+        f"[슬라이드 {slide.index}]\n{slide.text[:1800]}"
+        for slide in selected_slides[:3]
+    ) or "(관련 슬라이드 없음)"
+    expected_points = "\n".join(
+        f"- {point}"
+        for point in req.expected_answer_points[:3]
+        if point.strip()
+    ) or "- 현재 질문에서 확인하려던 핵심 요소 한 가지"
+    source_question = req.question.strip()
+    focus = req.question_focus.strip() or source_question[:160]
+
+    system = (
+        "당신은 발표 질의응답 연습을 돕는 평가자입니다. "
+        "학생이 현재 질문에 답하지 못했으므로 질문 횟수를 차감하지 않는 재도전 기회를 한 번 제공합니다. "
+        "학생이 입력한 무응답 문장은 제공되지 않으며 이전 답변을 추론하거나 언급해서는 안 됩니다. "
+        "supplement에는 정답 전체를 말하지 말고, 답을 유추하는 데 필요한 전제·비교·인과관계를 2~3문장으로 설명하세요. "
+        "retry_question은 현재 질문을 짧게 바꿔 반복하지 말고, 답변에 필요한 사고 과정의 바로 앞 단계 하나만 물으세요. "
+        "하나의 요구만 포함하고, 발표 자료 안에서 답을 추론할 수 있어야 합니다. "
+        "비정의형 질문을 단순한 용어 정의 질문으로 바꾸지 마세요. "
+        "retry_focus와 retry_expected_answer_points는 재질문 자체만 평가할 수 있도록 새로 작성하세요. "
+        'JSON만 반환: {"supplement":"<사고 지원 설명>","retry_question":"<재질문>",'
+        '"retry_focus":"<재질문의 평가 초점>","retry_expected_answer_points":["<요소1>","<요소2>"],'
+        '"related_slides":[<번호 1~2개>]}. '
+    )
+    user = (
+        f"[현재 질문]\n{source_question}\n\n"
+        f"[현재 질문 유형]\n{current_type}\n\n"
+        f"[현재 질문 초점]\n{focus}\n\n"
+        f"[현재 질문의 기대 요소]\n{expected_points}\n\n"
+        f"[관련 발표 자료]\n{slide_context}\n\n"
+        "학생이 스스로 답을 떠올릴 수 있도록 사고 단계를 한 단계 낮춘 재질문 계약을 생성하세요."
+    )
+
+    data: dict = {}
+    try:
+        data = llm_client.chat_json(
+            system,
+            user,
+            get_model_hint(req.persona_id),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM retry generation failed; deterministic fallback used")
+
+    valid_slide_indices = {slide.index for slide in req.slides}
+    preferred_indices = {
+        index for index in req.context_slides if index in valid_slide_indices
+    }
+    related_slides = _parse_int_list(
+        data.get("related_slides"),
+        valid_values=preferred_indices or valid_slide_indices,
+        limit=2,
+    )
+    if not related_slides and preferred_indices:
+        related_slides = sorted(preferred_indices)[:2]
+
+    fallback_question, fallback_focus, fallback_points = _fallback_unknown_retry(
+        focus,
+        current_type,
+    )
+    supplement_raw = data.get("supplement")
+    supplement = (
+        supplement_raw.strip()
+        if isinstance(supplement_raw, str) and supplement_raw.strip()
+        else _fallback_supplement(focus, current_type)
+    )
+    retry_raw = data.get("retry_question")
+    retry_question = retry_raw.strip() if isinstance(retry_raw, str) else ""
+    if (
+        not retry_question
+        or _is_duplicate_question(retry_question, [source_question], threshold=0.84)
+        or _is_trivial_definition_retry(retry_question, current_type)
+    ):
+        retry_question = fallback_question
+
+    retry_focus_raw = data.get("retry_focus")
+    retry_focus = (
+        retry_focus_raw.strip()
+        if isinstance(retry_focus_raw, str) and retry_focus_raw.strip()
+        else fallback_focus
+    )
+    retry_points = _parse_string_list(
+        data.get("retry_expected_answer_points"),
+        limit=3,
+    ) or fallback_points
+
+    return EvaluateResponse(
+        answer_status="unknown",
+        verdict="확인 필요",
+        strengths="",
+        gaps="기본 아이디어를 바탕으로 현재 질문을 한 단계 나누어 다시 생각해 보세요.",
+        supplement=supplement,
+        related_slides=related_slides,
+        retry_question=retry_question,
+        retry_question_type=current_type,
+        retry_question_focus=retry_focus,
+        retry_expected_answer_points=retry_points,
+        next_action="retry_after_unknown",
+        rubric={},
     )
 
 
 def _fallback_required_followup(
     question_focus: str,
     current_type: QuestionType,
-    difficulty: str,
-    turn: int,
-) -> tuple[str, QuestionType]:
-    """남은 정상 꼬리질문 횟수 보장을 위한 대체 질문 생성."""
+) -> tuple[str, QuestionType, str, List[str]]:
+    """정상 답변 이후 심화·확장용 꼬리질문 계약 생성."""
     focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
-    subject = focus or "원래 질문의 핵심 내용"
-
-    # 첫 정상 꼬리질문의 인접 유형 전환
-    next_type = current_type
-    if turn == 0:
-        if difficulty == "easy":
-            if current_type == "definition":
-                next_type = "application"
-        else:
-            next_type = _TYPE_TRANSITIONS[current_type]
-
-    templates: Dict[QuestionType, str] = {
+    subject = focus or "앞선 답변의 핵심 내용"
+    next_type = _TYPE_TRANSITIONS[current_type]
+    templates: Dict[QuestionType, tuple[str, QuestionType, str, List[str]]] = {
         "definition": (
-            f"{subject}을 판단할 때 가장 중요한 의미나 구분 기준 한 가지는 무엇인가요?"
+            f"방금 설명한 {subject}이 실제 발표 사례에서 어떻게 드러나는지 한 가지 예로 설명해 주실 수 있나요?",
+            "application",
+            f"{subject}의 실제 사례 확장",
+            ["앞선 정의와 연결되는 사례 한 가지", "사례가 해당 개념을 보여 주는 이유"],
         ),
         "evidence": (
-            f"{subject}에 관한 방금 답변을 뒷받침하는 자료 속 근거 한 가지는 무엇인가요?"
+            "방금 제시한 근거가 약해지거나 결론이 달라질 수 있는 조건은 무엇인가요?",
+            "counterexample",
+            f"{subject}의 근거가 약해지는 조건 확인",
+            ["근거가 약해지는 조건 한 가지", "그 조건에서 결론이 달라지는 방식"],
         ),
         "counterexample": (
-            f"{subject}에 관한 설명이 그대로 성립하지 않을 수 있는 자료 속 조건 한 가지는 무엇인가요?"
+            "방금 제시한 예외 상황을 줄이거나 보완하기 위해 어떤 방법을 적용할 수 있나요?",
+            "application",
+            f"{subject}의 예외 조건에 대한 보완 방법 확장",
+            ["예외 상황을 줄이는 보완 방법", "보완 방법이 작동하는 이유"],
         ),
         "application": (
-            f"{subject}에 관한 방금 설명을 자료 속 다른 예시에 적용하면 어떻게 판단할 수 있나요?"
+            "방금 제안한 적용 방식이 타당하다고 판단할 수 있는 발표 자료 속 근거는 무엇인가요?",
+            "evidence",
+            f"{subject}의 적용 결과를 뒷받침하는 근거 확인",
+            ["적용 결과를 뒷받침하는 자료 속 근거", "근거와 적용 결과의 연결"],
         ),
     }
+    return templates[current_type]
 
-    return templates[next_type], next_type
+
+def _build_followup(
+    req: EvaluateRequest,
+    evaluation_data: dict,
+) -> tuple[str, QuestionType, str, List[str]] | None:
+    """기본 질문의 정상 답변을 심화·확장하는 꼬리질문 생성."""
+    current_type = req.question_type or req.root_question_type or "definition"
+    fallback_question, fallback_type, fallback_focus, fallback_points = (
+        _fallback_required_followup(req.question_focus, current_type)
+    )
+    prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
+    selected_slides = material_context.select_context_slides(
+        prompt_slides,
+        req.context_slides,
+        query=req.question_focus or req.question,
+    )
+    slide_context = "\n\n".join(
+        f"[슬라이드 {slide.index}]\n{slide.text[:1600]}"
+        for slide in selected_slides[:3]
+    ) or "(관련 슬라이드 없음)"
+
+    system = (
+        "당신은 발표 질의응답의 꼬리질문을 만드는 평가자입니다. "
+        "학생은 앞선 기본 질문에 내용 있는 답변을 했습니다. "
+        "앞선 질문을 다시 말하거나 같은 정의를 반복해서 묻지 말고, 학생 답변에서 자연스럽게 이어지는 심화 또는 확장 질문 하나를 만드세요. "
+        "근거, 조건·한계, 반례, 다른 상황 적용 중 가장 가치 있는 방향 하나만 선택하세요. "
+        "질문은 발표 자료와 학생 답변으로 답할 수 있어야 하며, 한 문장에 요구를 하나만 포함하세요. "
+        'JSON만 반환: {"followup":"<꼬리질문>","followup_question_type":"<evidence|counterexample|application|definition>",'
+        '"followup_focus":"<평가 초점>","followup_expected_answer_points":["<요소1>","<요소2>"]}. '
+    )
+    user = (
+        f"[기본 질문]\n{req.question}\n\n"
+        f"[학생 답변]\n{req.answer}\n\n"
+        f"[평가 강점]\n{str(evaluation_data.get('strengths', '')).strip()}\n\n"
+        f"[평가 보완점]\n{str(evaluation_data.get('gaps', '')).strip()}\n\n"
+        f"[질문 초점]\n{req.question_focus}\n\n"
+        f"[관련 발표 자료]\n{slide_context}\n\n"
+        "앞선 답변을 한 단계 심화하거나 확장하는 꼬리질문 계약을 생성하세요."
+    )
+
+    data: dict = {}
+    try:
+        data = llm_client.chat_json(
+            system,
+            user,
+            get_model_hint(req.persona_id),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM follow-up generation failed; deterministic fallback used")
+
+    raw_question = data.get("followup")
+    followup = raw_question.strip() if isinstance(raw_question, str) else ""
+    if not followup or _is_duplicate_question(
+        followup,
+        [req.question, req.root_question or ""],
+        threshold=0.82,
+    ):
+        followup = fallback_question
+
+    if _is_duplicate_question(
+        followup,
+        [req.question, req.root_question or ""],
+        threshold=0.88,
+    ):
+        return None
+
+    followup_type = _parse_question_type(
+        data.get("followup_question_type"),
+        fallback_type,
+    )
+    followup_focus_raw = data.get("followup_focus")
+    followup_focus = (
+        followup_focus_raw.strip()
+        if isinstance(followup_focus_raw, str) and followup_focus_raw.strip()
+        else fallback_focus
+    )
+    followup_points = _parse_string_list(
+        data.get("followup_expected_answer_points"),
+        limit=3,
+    ) or fallback_points
+    return followup, followup_type, followup_focus, followup_points
 
 
 @app.post("/api/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest):
+    current_role = "retry" if req.is_unknown_retry else req.question_role
     no_answer = _is_no_answer(req.answer)
-    current_type = req.question_type or req.root_question_type or "definition"
 
-    # 쉬운 재질문의 명시적 답변 불가에 대한 LLM 호출 생략
-    if req.is_unknown_retry and no_answer:
-        followup = None
-        followup_question_type = None
-
-        if req.turn < req.max_turns:
-            followup, followup_question_type = _fallback_required_followup(
-                question_focus=req.question_focus,
-                current_type=current_type,
-                difficulty=req.difficulty,
-                turn=req.turn,
-            )
-
+    # 무응답 재질문의 두 번째 무응답 종료
+    if current_role == "retry" and no_answer:
         return EvaluateResponse(
             answer_status="unknown",
             verdict="확인 필요",
             strengths="",
-            gaps="쉬운 재질문에도 답변하지 못해 이 질문은 여기까지 진행합니다.",
-            supplement=None,
-            related_slides=[],
-            followup=followup,
-            followup_question_type=followup_question_type,
+            gaps="재질문에도 답변하지 못해 현재 질문은 여기까지 진행합니다.",
+            next_action=_next_action_after_current_question(req),
             rubric={},
         )
 
+    # 기본 질문 또는 꼬리질문의 최초 무응답 처리
+    if no_answer:
+        return _build_unknown_retry(req)
+
     persona = get_persona(req.persona_id)
     persona_system = persona["system"] + get_field_hint(req.field)
-
+    prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
     system, user = prompts.build_evaluate_prompt(
         persona_system=persona_system,
-        script=req.script,
-        slides=req.slides,
+        script=material_context.compact_script(req.script),
+        slides=prompt_slides,
         question=req.question,
         answer=req.answer,
         turn=req.turn,
@@ -445,145 +809,70 @@ def evaluate(req: EvaluateRequest):
         question_focus=req.question_focus,
         context_slides=req.context_slides,
         expected_answer_points=req.expected_answer_points,
-        is_no_answer=no_answer,
+        is_no_answer=False,
     )
     try:
         data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))
     except Exception:  # noqa: BLE001
         logger.exception("LLM call failed in /api/evaluate")
-        raise HTTPException(status_code=502, detail="AI 평가 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+        raise HTTPException(
+            status_code=502,
+            detail="AI 평가 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+        )
 
-    # LLM도 답변 불가로 판단한 경우를 보조적으로 수용하되,
-    # 명시적 표현은 서버 판정을 최종 기준으로 사용합니다.
+    # 정규식에서 놓친 무응답 뉘앙스의 모델 보조 판정
     model_status = str(data.get("answer_status", "")).strip().lower()
-    is_unknown = no_answer or model_status == "unknown"
-
-    valid_slide_indices = {slide.index for slide in req.slides}
-    preferred_slide_indices = {
-        index for index in req.context_slides if index in valid_slide_indices
-    }
-    related_valid_values = preferred_slide_indices or valid_slide_indices
-    related_slides = _parse_int_list(
-        data.get("related_slides"),
-        valid_values=related_valid_values,
-    )
-
-    supplement_raw = data.get("supplement")
-    supplement = supplement_raw.strip() if isinstance(supplement_raw, str) else None
-    if supplement and supplement.lower() in ("null", "none"):
-        supplement = None
-
-    if is_unknown:
-        # 쉬운 재질문에서 재차 감지된 답변 불가의 반복 차단
-        if req.is_unknown_retry:
-            followup = None
-            followup_question_type = None
-
-            if req.turn < req.max_turns:
-                followup, followup_question_type = _fallback_required_followup(
-                    question_focus=req.question_focus,
-                    current_type=current_type,
-                    difficulty=req.difficulty,
-                    turn=req.turn,
-                )
-
+    if model_status == "unknown":
+        if current_role == "retry":
             return EvaluateResponse(
                 answer_status="unknown",
                 verdict="확인 필요",
                 strengths="",
-                gaps="쉬운 재질문에도 답변하지 못해 이 질문은 여기까지 진행합니다.",
-                supplement=None,
-                related_slides=[],
-                followup=followup,
-                followup_question_type=followup_question_type,
+                gaps="재질문에도 답변하지 못해 현재 질문은 여기까지 진행합니다.",
+                next_action=_next_action_after_current_question(req),
                 rubric={},
             )
+        return _build_unknown_retry(req)
 
-        # 최초 답변 불가의 힌트 및 쉬운 재질문 반환
-        if not related_slides and preferred_slide_indices:
-            related_slides = sorted(preferred_slide_indices)[:2]
-
-        model_gaps = str(data.get("gaps", "")).strip()
-        retry_question = data.get("followup")
-        if (
-            isinstance(retry_question, str)
-            and retry_question.strip().lower() in ("null", "none", "")
-        ):
-            retry_question = None
-
-        # 모델 누락 시 동일 주제의 쉬운 재질문 보장
-        if not isinstance(retry_question, str):
-            retry_question = _fallback_unknown_retry(req.question_focus)
-
-        retry_question_type = _parse_question_type(
-            data.get("followup_question_type"),
-            "definition",
-        )
-
-        return EvaluateResponse(
-            answer_status="unknown",
-            verdict="확인 필요",
-            strengths="",
-            gaps=model_gaps or "질문의 핵심 내용을 발표 전에 다시 확인해 보세요.",
-            supplement=supplement or _fallback_supplement(req.expected_answer_points),
-            related_slides=related_slides,
-            followup=retry_question.strip(),
-            followup_question_type=retry_question_type,
-            rubric={},
-        )
-
-    followup = data.get("followup")
-    if isinstance(followup, str) and followup.strip().lower() in ("null", "none", ""):
-        followup = None
-
-    allowed_types = _allowed_followup_types(
-        current_type=current_type,
-        difficulty=req.difficulty,
-        turn=req.turn,
-    )
-
-    followup_question_type = None
-    if isinstance(followup, str):
-        parsed_followup_type = _parse_question_type(
-            data.get("followup_question_type"),
-            current_type,
-        )
-        followup_question_type = (
-            parsed_followup_type
-            if parsed_followup_type in allowed_types
-            else current_type
-        )
-
-    # 모델 누락에 대한 정상 꼬리질문 횟수 보장
-    if req.turn < req.max_turns and not isinstance(followup, str):
-        fallback_followup, fallback_type = _fallback_required_followup(
-            question_focus=req.question_focus,
-            current_type=current_type,
-            difficulty=req.difficulty,
-            turn=req.turn,
-        )
-        followup = fallback_followup
-        followup_question_type = (
-            fallback_type if fallback_type in allowed_types else current_type
-        )
-
-    # 선택한 정상 꼬리질문 횟수 완료 후 종료
-    if req.turn >= req.max_turns:
-        followup = None
-        followup_question_type = None
-
-    return EvaluateResponse(
+    response_kwargs = dict(
         answer_status="answered",
         verdict=str(data.get("verdict", "")).strip(),
         strengths=str(data.get("strengths", "")).strip(),
         gaps=str(data.get("gaps", "")).strip(),
         supplement=None,
         related_slides=[],
-        followup=followup.strip() if isinstance(followup, str) else None,
-        followup_question_type=followup_question_type,
         rubric=_parse_rubric(data.get("rubric")),
     )
 
+    # 무응답 재질문 또는 꼬리질문 답변 뒤 추가 꼬리질문 금지
+    if current_role in {"retry", "followup"}:
+        return EvaluateResponse(
+            **response_kwargs,
+            next_action=_next_action_after_current_question(req),
+        )
+
+    # 기본 질문 답변 뒤 남은 질문 슬롯이 있을 때만 꼬리질문 생성
+    if req.turn < req.max_turns:
+        followup_contract = _build_followup(req, data)
+        if followup_contract is not None:
+            followup, followup_type, followup_focus, followup_points = followup_contract
+            return EvaluateResponse(
+                **response_kwargs,
+                followup=followup,
+                followup_question_type=followup_type,
+                followup_focus=followup_focus,
+                followup_expected_answer_points=followup_points,
+                next_action="ask_followup",
+            )
+        return EvaluateResponse(
+            **response_kwargs,
+            next_action="move_to_new_root",
+        )
+
+    return EvaluateResponse(
+        **response_kwargs,
+        next_action="finish",
+    )
 
 # ------------------------------------------------------------ report helpers
 _FILLER_PATTERN = re.compile(
