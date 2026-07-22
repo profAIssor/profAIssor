@@ -1,15 +1,16 @@
 export type PersonaId = 'standard' | 'professor' | 'peer' | 'layperson'
-
 export type Difficulty = 'easy' | 'medium' | 'hard'
 export type AcademicField = 'engineering' | 'humanities' | 'natural'
-
-export type QuestionType =
-  | 'evidence'
-  | 'counterexample'
-  | 'application'
-  | 'definition'
-
+export type QuestionType = 'evidence' | 'counterexample' | 'application' | 'definition'
 export type AnswerStatus = 'answered' | 'unknown'
+export type QuestionRole = 'root' | 'followup' | 'retry'
+
+/** 평가 직후 프론트엔드에서 실행할 질문 흐름 구분. */
+export type EvaluationNextAction =
+  | 'retry_after_unknown'
+  | 'ask_followup'
+  | 'move_to_new_root'
+  | 'finish'
 
 export interface Persona {
   id: PersonaId
@@ -36,27 +37,35 @@ export interface EvaluateResponse {
   verdict: string
   strengths: string
   gaps: string
+  answer_status: AnswerStatus
+  rubric: Record<string, string>
+  next_action: EvaluationNextAction
+
   followup: string | null
   followup_question_type: QuestionType | null
-  answer_status: AnswerStatus
+  followup_focus: string
+  followup_expected_answer_points: string[]
+
   supplement: string | null
   related_slides: number[]
-  rubric: Record<string, string>
+  retry_question: string | null
+  retry_question_type: QuestionType | null
+  retry_question_focus: string
+  retry_expected_answer_points: string[]
 }
 
 export interface TranscriptTurn {
   persona_id: string
   question: string
   question_type?: QuestionType
+  question_role?: QuestionRole
   answer: string
   verdict: string
   strengths: string
   gaps: string
-  // 1-4: 답변 불가 흐름용 필드 (unknown 턴의 보충 힌트 표시)
   answer_status?: AnswerStatus
   supplement?: string | null
   related_slides?: number[]
-  // main(PR#15): 답변별 상세 교정 카드에서 rubric 표시
   rubric: Record<string, string>
 }
 
@@ -93,17 +102,12 @@ export interface Report {
   slide_coverage: SlideCoverage[]
   filler_count: number
   word_count: number
-
-  // 1-4C: 관찰→영향→수정 행동→수정 예시 구조의 구체적 코칭
-  // 옵셔널로 두어 이전에 저장된 localStorage 세션(SessionRecord)도
-  // 필드 없이 그대로 렌더링될 수 있게 함
   revisions?: Revision[]
   answer_structure_tip?: string
 }
 
 export type Stage = 'setup' | 'spar' | 'report' | 'history'
 
-/** A message rendered in the chat-style spar screen. */
 export interface ChatMessage {
   role: 'question' | 'answer' | 'verdict'
   personaId: PersonaId
