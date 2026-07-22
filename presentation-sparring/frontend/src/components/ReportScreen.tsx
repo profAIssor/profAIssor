@@ -1,6 +1,7 @@
 import { Brain, Lightbulb, ListChecks, MessageSquareText, Mic, RotateCcw, Shield, Target } from 'lucide-react'
 import { coverageRate } from '../lib/coverage'
 import { loadSessions } from '../lib/sessionStore'
+import { formatMinutes } from '../lib/timing'
 import { getPersona } from '../personas'
 import type { Report, RevisionActionType, TranscriptTurn } from '../types'
 
@@ -12,14 +13,16 @@ interface Props {
 
 export default function ReportScreen({ report, transcript, onRestart }: Props) {
   // Rough speaking-rate estimate: assume ~120 어절/분 delivery pace.
-  const estMinutes = report.word_count > 0 ? (report.word_count / 120).toFixed(1) : '0'
+  const estMinutes = report.word_count > 0 ? report.word_count / 120 : 0
+  const estSeconds = Math.round(estMinutes * 60)
   const uncovered = report.slide_coverage.filter((s) => !s.covered)
 
   // sessions[0] is this just-completed session (saveSession runs right
   // before this screen renders) — sessions[1] is the one to compare against.
   const previous = loadSessions()[1] ?? null
   const fillerDelta = previous ? report.filler_count - previous.report.filler_count : null
-  const minutesDelta = previous ? Number(estMinutes) - previous.estMinutes : null
+  // 델타도 초 단위로 비교해 "0.1분" 같은 추상적 표기를 피한다.
+  const secondsDelta = previous ? estSeconds - Math.round(previous.estMinutes * 60) : null
   const coverageDelta = previous
     ? coverageRate(report.slide_coverage) - coverageRate(previous.report.slide_coverage)
     : null
@@ -175,9 +178,9 @@ export default function ReportScreen({ report, transcript, onRestart }: Props) {
         <Metric label="총 어절 수" value={`${report.word_count}어절`} hint="대본 기준" />
         <Metric
           label="예상 발표 시간"
-          value={`~${estMinutes}분`}
+          value={formatMinutes(estMinutes)}
           hint="약 120어절/분 기준"
-          delta={minutesDelta == null ? null : { value: Number(minutesDelta.toFixed(1)), goodDirection: 'down', unit: '분' }}
+          delta={secondsDelta == null ? null : { value: secondsDelta, goodDirection: 'down', unit: '초' }}
         />
         <Metric
           label="슬라이드 커버리지"

@@ -2,6 +2,7 @@ import { RotateCcw } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { coverageRate } from '../lib/coverage'
 import type { SessionRecord } from '../lib/sessionStore'
+import { formatMinutes } from '../lib/timing'
 
 interface Props {
   sessions: SessionRecord[]
@@ -19,7 +20,8 @@ export default function HistoryScreen({ sessions, onRestart }: Props) {
   const chartData = [...sessions].reverse().map((s) => ({
     label: shortDate(s.completedAt),
     필러: s.report.filler_count,
-    예상시간: Number(s.estMinutes.toFixed(1)),
+    // 초 단위로 표시 — 분 단위(0.2 등)는 축 바닥에 깔려 추이가 안 보임
+    '예상시간(초)': Math.round(s.estMinutes * 60),
     커버리지: coverageRate(s.report.slide_coverage),
   }))
 
@@ -43,12 +45,12 @@ export default function HistoryScreen({ sessions, onRestart }: Props) {
                     <Tooltip />
                     <Line type="monotone" dataKey="필러" stroke="#f43f5e" strokeWidth={2} dot={{ r: 3 }} />
                     <Line type="monotone" dataKey="커버리지" stroke="#4f46e5" strokeWidth={2} dot={{ r: 3 }} />
-                    <Line type="monotone" dataKey="예상시간" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} />
+                    <Line type="monotone" dataKey="예상시간(초)" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
               <p className="mt-2 text-xs text-slate-400">
-                필러(빨강, 회) · 슬라이드 커버리지(남색, %) · 예상 발표시간(초록, 분)
+                필러(빨강, 회) · 슬라이드 커버리지(남색, %) · 예상 발표시간(초록, 초)
               </p>
             </section>
           )}
@@ -59,7 +61,7 @@ export default function HistoryScreen({ sessions, onRestart }: Props) {
                 <div className="font-semibold text-slate-800">{shortDate(s.completedAt)}</div>
                 <div className="mt-1 text-xs text-slate-500">
                   전공계열: {s.field ?? '미지정'} · 어절 수: {s.report.word_count} · 필러: {s.report.filler_count}회 ·
-                  예상 발표 시간: ~{s.estMinutes.toFixed(1)}분 · 커버리지: {coverageRate(s.report.slide_coverage)}%
+                  예상 발표 시간: {formatMinutes(s.estMinutes)} · 커버리지: {coverageRate(s.report.slide_coverage)}%
                 </div>
               </li>
             ))}
