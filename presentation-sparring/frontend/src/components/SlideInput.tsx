@@ -8,7 +8,7 @@ interface Props {
   onChange: (slides: Slide[]) => void
 }
 
-/** 슬라이드 텍스트 추가·삭제·수정 및 PPT 업로드 입력 목록 */
+/** 슬라이드 텍스트 추가·삭제·수정 및 발표 자료(PPT/PDF) 업로드 입력 목록 */
 export default function SlideInput({ slides, onChange }: Props) {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -55,11 +55,11 @@ export default function SlideInput({ slides, onChange }: Props) {
         }
       >
         <Upload className="h-4 w-4" />
-        {uploading ? 'PPT에서 추출하는 중…' : 'PPT 업로드 (.pptx)'}
+        {uploading ? '발표 자료에서 추출하는 중…' : '발표 자료 업로드 (.pptx / .pdf)'}
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pptx"
+          accept=".pptx,.pdf"
           className="hidden"
           disabled={uploading}
           onChange={(e) => {
