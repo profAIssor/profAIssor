@@ -50,6 +50,7 @@ interface Options {
 }
 
 interface PendingFlush {
+  promise: Promise<string>
   resolve: (text: string) => void
   timeoutId: number
 }
@@ -92,6 +93,8 @@ const FATAL_ERRORS = new Set([
   'service-not-allowed',
   'audio-capture',
 ])
+
+const FLUSH_TIMEOUT_MS = 3_000
 
 const ERROR_MESSAGES: Record<string, string> = {
   'not-allowed':
@@ -252,6 +255,10 @@ export function useSpeechRecognition({
       shouldListenRef.current = false
       listeningRef.current = false
 
+      recognition.onresult = null
+      recognition.onerror = null
+      recognition.onend = null
+
       try {
         recognition.stop()
       } catch {
@@ -293,53 +300,47 @@ export function useSpeechRecognition({
       shouldListenRef.current = false
       onInterimRef.current?.('')
 
-      if (
-        !recognition ||
-        (!listeningRef.current &&
-          !pendingFlushRef.current)
-      ) {
+      const existingFlush = pendingFlushRef.current
+      if (existingFlush) {
+        return existingFlush.promise
+      }
+
+      if (!recognition || !listeningRef.current) {
         listeningRef.current = false
         setListening(false)
         return answerTranscriptRef.current.trim()
       }
 
-      if (pendingFlushRef.current) {
-        return new Promise((resolve) => {
-          const checkInterval = window.setInterval(() => {
-            if (!pendingFlushRef.current) {
-              window.clearInterval(checkInterval)
-              resolve(
-                answerTranscriptRef.current.trim(),
-              )
-            }
-          }, 20)
-        })
+      let resolvePromise:
+        | ((text: string) => void)
+        | null = null
+
+      const promise = new Promise<string>((resolve) => {
+        resolvePromise = resolve
+      })
+
+      const timeoutId = window.setTimeout(() => {
+        listeningRef.current = false
+        setListening(false)
+        onInterimRef.current?.('')
+        resolvePendingFlush()
+      }, FLUSH_TIMEOUT_MS)
+
+      pendingFlushRef.current = {
+        promise,
+        resolve: (text: string) => {
+          resolvePromise?.(text)
+        },
+        timeoutId,
       }
 
-      return new Promise<string>((resolve) => {
-        const timeoutId = window.setTimeout(() => {
-          listeningRef.current = false
-          setListening(false)
-          onInterimRef.current?.('')
+      try {
+        recognition.stop()
+      } catch {
+        resolvePendingFlush()
+      }
 
-          const pending = pendingFlushRef.current
-          pendingFlushRef.current = null
-          pending?.resolve(
-            answerTranscriptRef.current.trim(),
-          )
-        }, 1500)
-
-        pendingFlushRef.current = {
-          resolve,
-          timeoutId,
-        }
-
-        try {
-          recognition.stop()
-        } catch {
-          resolvePendingFlush()
-        }
-      })
+      return promise
     }, [resolvePendingFlush])
 
   /** 대기 없이 STT 종료 요청. */

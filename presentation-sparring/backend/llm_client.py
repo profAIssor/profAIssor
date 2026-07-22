@@ -11,9 +11,11 @@ import logging
 import os
 import re
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 PROVIDER = os.getenv("LLM_PROVIDER", "mock").lower()
@@ -37,25 +39,71 @@ _TIMEOUT = 60
 # Uvicorn 로그 형식을 그대로 사용
 _logger = logging.getLogger("uvicorn.error")
 
+RequestKind = Literal[
+    "question",
+    "evaluate",
+    "retry",
+    "followup",
+    "unknown_closure",
+    "report",
+    "reference_repair",
+    "chat",
+]
+
+# 연결 재사용과 일시 오류 재시도 설정
+_RETRY_POLICY = Retry(
+    total=2,
+    connect=2,
+    read=0,
+    status=2,
+    backoff_factor=0.6,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset({"POST"}),
+    respect_retry_after_header=True,
+    raise_on_status=False,
+)
+_SESSION = requests.Session()
+_SESSION.mount(
+    "https://",
+    HTTPAdapter(
+        max_retries=_RETRY_POLICY,
+        pool_connections=10,
+        pool_maxsize=10,
+    ),
+)
+
 # 호출 목적별 출력 토큰 상한.
 # question/evaluate는 응답 JSON 스키마가 고정이라 짧게 제한하고,
 # report는 슬라이드 커버리지 배열이 슬라이드 수에 비례해 길어지므로 여유를 둔다.
 # 출력 상한은 비용 통제와 '잘린 JSON → 파싱 실패' 방지를 겸한다.
 _MAX_OUTPUT_TOKENS = {
-    "question": 500,
-    "evaluate": 800,
-    "report": 2048,
-    "chat": 1024,
+    "question": 700,
+    "evaluate": 900,
+    "retry": 700,
+    "followup": 700,
+    "unknown_closure": 900,
+    "report": 4096,
+    "reference_repair": 1800,
+    "chat": 1200,
 }
 
 
-def _sampling_config(request_kind: str) -> tuple[float, int]:
+def _sampling_config(request_kind: RequestKind) -> tuple[float, int]:
     """호출 목적별 (temperature, max_output_tokens)를 반환.
 
     평가는 같은 답변에 같은 판정이 나와야 하므로 온도를 낮추고(0.3),
     질문 생성과 리포트는 표현이 매번 똑같이 반복되지 않도록 0.7을 유지한다.
     """
-    temperature = 0.3 if request_kind == "evaluate" else 0.7
+    temperature = (
+        0.3
+        if request_kind
+        in {
+            "evaluate",
+            "unknown_closure",
+            "reference_repair",
+        }
+        else 0.7
+    )
     max_tokens = _MAX_OUTPUT_TOKENS.get(request_kind, _MAX_OUTPUT_TOKENS["chat"])
     return temperature, max_tokens
 
@@ -66,25 +114,13 @@ _USAGE_LOG_ENABLED = os.getenv(
 ).lower() in {"1", "true", "yes", "on"}
 
 
-def _detect_request_kind(system: str) -> str:
-    """응답 JSON 스키마를 기준으로 LLM 호출 목적을 구분."""
-    if '"targets_slide"' in system:
-        return "question"
-
-    if '"verdict"' in system and '"followup"' in system:
-        return "evaluate"
-
-    if '"slide_coverage"' in system:
-        return "report"
-
-    return "chat"
 
 
 def _log_usage(
     *,
     provider: str,
     model: str,
-    request_kind: str,
+    request_kind: RequestKind,
     input_tokens: int,
     output_tokens: int,
     total_tokens: int,
@@ -116,7 +152,12 @@ def _resolve_model(provider: str, model_hint: Optional[str] = None) -> str:
     return _MODEL_CONFIG.get(provider, {}).get("model", "")
 
 
-def _call_openai(system: str, user: str, model: str) -> str:
+def _call_openai(
+    system: str,
+    user: str,
+    model: str,
+    request_kind: RequestKind,
+) -> str:
     """OpenAI를 호출하고 응답 텍스트와 사용량을 처리"""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -124,10 +165,9 @@ def _call_openai(system: str, user: str, model: str) -> str:
 
     started_at = time.perf_counter()
 
-    request_kind = _detect_request_kind(system)
     temperature, max_tokens = _sampling_config(request_kind)
 
-    response = requests.post(
+    response = _SESSION.post(
         _MODEL_CONFIG["openai"]["url"],
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -169,7 +209,12 @@ def _call_openai(system: str, user: str, model: str) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-def _call_gemini(system: str, user: str, model: str) -> str:
+def _call_gemini(
+    system: str,
+    user: str,
+    model: str,
+    request_kind: RequestKind,
+) -> str:
     """Gemini generateContent API를 호출하고 응답 텍스트를 반환"""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -180,10 +225,9 @@ def _call_gemini(system: str, user: str, model: str) -> str:
         f"{model}:generateContent?key={api_key}"
     )
 
-    request_kind = _detect_request_kind(system)
     temperature, max_tokens = _sampling_config(request_kind)
 
-    response = requests.post(
+    response = _SESSION.post(
         url,
         headers={"Content-Type": "application/json"},
         json={
@@ -516,9 +560,14 @@ def _mock_unknown_retry(user: str) -> tuple[str, str]:
     )
 
 
-def _call_mock(system: str, user: str, model: str) -> str:
+def _call_mock(
+    system: str,
+    user: str,
+    model: str,
+    request_kind: RequestKind,
+) -> str:
     """API 키 없이 전체 흐름을 검사할 수 있는 JSON 응답을 반환"""
-    _ = model
+    _ = model, request_kind
 
     if '"targets_slide"' in system:
         return json.dumps(_mock_question(system, user), ensure_ascii=False)
@@ -632,6 +681,8 @@ def chat(
     system: str,
     user: str,
     model_hint: Optional[str] = None,
+    *,
+    kind: RequestKind = "chat",
 ) -> str:
     """설정된 provider에 요청을 보내고 원문 텍스트를 반환"""
     provider_call = _DISPATCH.get(PROVIDER)
@@ -642,25 +693,37 @@ def chat(
         )
 
     model = _resolve_model(PROVIDER, model_hint)
-    return provider_call(system, user, model)
+    return provider_call(
+        system,
+        user,
+        model,
+        kind,
+    )
 
 
 def chat_json(
     system: str,
     user: str,
     model_hint: Optional[str] = None,
+    *,
+    kind: RequestKind = "chat",
 ) -> dict:
     """LLM 응답의 JSON 객체 변환"""
-
-    raw_response = chat(system, user, model_hint)
+    raw_response = chat(
+        system,
+        user,
+        model_hint,
+        kind=kind,
+    )
 
     try:
         return extract_json(raw_response)
     except (json.JSONDecodeError, ValueError):
-        # 민감 정보 제외를 위한 응답 앞부분 기록
+        # 프롬프트·응답 원문을 기록하지 않는 파싱 실패 로그
         _logger.exception(
-            "LLM JSON parsing failed: response=%r",
-            raw_response[:1000],
+            "LLM JSON parsing failed: kind=%s response_chars=%d",
+            kind,
+            len(raw_response),
         )
         raise
 

@@ -394,6 +394,7 @@ def _generate_question_data(
                 system,
                 user,
                 get_model_hint(req.persona_id),
+                kind="question",
             )
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -751,6 +752,7 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
             system,
             user,
             get_model_hint(req.persona_id),
+            kind="retry",
         )
     except Exception:  # noqa: BLE001
         logger.exception("LLM retry generation failed; deterministic fallback used")
@@ -896,6 +898,7 @@ def _build_unknown_closure(
             system,
             user,
             get_model_hint(req.persona_id),
+            kind="unknown_closure",
         )
     except Exception:  # noqa: BLE001
         logger.exception(
@@ -1458,6 +1461,7 @@ def _build_followup(
             system,
             user,
             get_model_hint(req.persona_id),
+            kind="followup",
         )
     except Exception:  # noqa: BLE001
         logger.exception("LLM follow-up generation failed; deterministic fallback used")
@@ -1570,7 +1574,12 @@ def evaluate(req: EvaluateRequest):
         is_no_answer=False,
     )
     try:
-        data = llm_client.chat_json(system, user, get_model_hint(req.persona_id))
+        data = llm_client.chat_json(
+            system,
+            user,
+            get_model_hint(req.persona_id),
+            kind="evaluate",
+        )
     except Exception:  # noqa: BLE001
         logger.exception("LLM call failed in /api/evaluate")
         raise HTTPException(
@@ -2242,6 +2251,7 @@ def _repair_missing_reference_answers(
         repair_data = llm_client.chat_json(
             system,
             user,
+            kind="reference_repair",
         )
     except Exception:  # noqa: BLE001
         logger.exception(
@@ -2354,7 +2364,11 @@ def report(req: ReportRequest):
         speech_context=speech_prompt_context,
     )
     try:
-        data = llm_client.chat_json(system, user)
+        data = llm_client.chat_json(
+            system,
+            user,
+            kind="report",
+        )
     except Exception:  # noqa: BLE001
         logger.exception("LLM call failed in /api/report")
         raise HTTPException(status_code=502, detail="리포트 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")

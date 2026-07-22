@@ -46,6 +46,8 @@ interface UseMicMetricsResult {
   resetAnswer: () => void
 }
 
+const AUDIO_PIPELINE_IDLE_RELEASE_MS = 30_000
+
 /** 브라우저 AudioContext 생성자 조회. */
 function getAudioContextConstructor(): typeof AudioContext | null {
   const browserWindow = window as BrowserWindow
@@ -72,11 +74,18 @@ export function useMicMetrics(): UseMicMetricsResult {
   const sourceRef =
     useRef<MediaStreamAudioSourceNode | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const sampleBufferRef = useRef<Float32Array<ArrayBuffer> | null>(null)
+  const sampleBufferRef =
+    useRef<Float32Array<ArrayBuffer> | null>(null)
   const intervalRef = useRef<number | null>(null)
+  const idleReleaseTimerRef = useRef<number | null>(null)
   const activeSegmentRef = useRef<ActiveSegment | null>(null)
   const completedSegmentsRef =
     useRef<CapturedSpeechSegment[]>([])
+  const startingPromiseRef =
+    useRef<Promise<boolean> | null>(null)
+  const startRequestedRef = useRef(false)
+  const disposedRef = useRef(false)
+
   const liveSilenceStateRef = useRef<LiveSilenceState>({
     noiseFloorRms: 0.003,
     silenceStartedAtMs: 0,
@@ -90,13 +99,73 @@ export function useMicMetrics(): UseMicMetricsResult {
     intervalRef.current = null
   }, [])
 
+  /** 유휴 파이프라인 해제 타이머 정리. */
+  const clearIdleReleaseTimer = useCallback(() => {
+    if (idleReleaseTimerRef.current == null) return
+    window.clearTimeout(idleReleaseTimerRef.current)
+    idleReleaseTimerRef.current = null
+  }, [])
+
+  /** Web Audio 파이프라인과 마이크 트랙 해제. */
+  const releaseAudioPipeline = useCallback(() => {
+    clearSamplingInterval()
+    clearIdleReleaseTimer()
+
+    const source = sourceRef.current
+    const stream = streamRef.current
+    const audioContext = audioContextRef.current
+
+    sourceRef.current = null
+    streamRef.current = null
+    audioContextRef.current = null
+    analyserRef.current = null
+    sampleBufferRef.current = null
+
+    try {
+      source?.disconnect()
+    } catch {
+      // 이미 해제된 오디오 노드 무시
+    }
+
+    for (const track of stream?.getTracks() ?? []) {
+      track.stop()
+    }
+
+    if (
+      audioContext &&
+      audioContext.state !== 'closed'
+    ) {
+      void audioContext.close().catch(() => {
+        // 브라우저 종료 시점의 AudioContext 해제 오류 무시
+      })
+    }
+  }, [clearIdleReleaseTimer, clearSamplingInterval])
+
+  /** 비활성 상태 지속 후 마이크 파이프라인 해제 예약. */
+  const scheduleAudioPipelineRelease =
+    useCallback(() => {
+      clearIdleReleaseTimer()
+      idleReleaseTimerRef.current = window.setTimeout(
+        () => {
+          if (
+            !activeSegmentRef.current &&
+            !startRequestedRef.current
+          ) {
+            releaseAudioPipeline()
+          }
+        },
+        AUDIO_PIPELINE_IDLE_RELEASE_MS,
+      )
+    }, [clearIdleReleaseTimer, releaseAudioPipeline])
+
   /** 마이크 권한 및 AudioContext 파이프라인 초기화. */
   const ensureAudioPipeline =
     useCallback(async (): Promise<boolean> => {
       if (
         streamRef.current &&
         audioContextRef.current &&
-        analyserRef.current
+        analyserRef.current &&
+        sampleBufferRef.current
       ) {
         return true
       }
@@ -107,14 +176,20 @@ export function useMicMetrics(): UseMicMetricsResult {
         !AudioContextConstructor ||
         !navigator.mediaDevices?.getUserMedia
       ) {
-        setError(
-          '현재 브라우저에서 음성 분석 기능을 사용할 수 없습니다.',
-        )
+        if (!disposedRef.current) {
+          setError(
+            '현재 브라우저에서 음성 분석 기능을 사용할 수 없습니다.',
+          )
+        }
         return false
       }
 
+      let stream: MediaStream | null = null
+      let audioContext: AudioContext | null = null
+      let source: MediaStreamAudioSourceNode | null = null
+
       try {
-        const stream =
+        stream =
           await navigator.mediaDevices.getUserMedia({
             audio: {
               echoCancellation: true,
@@ -122,8 +197,8 @@ export function useMicMetrics(): UseMicMetricsResult {
               autoGainControl: true,
             },
           })
-        const audioContext = new AudioContextConstructor()
-        const source =
+        audioContext = new AudioContextConstructor()
+        source =
           audioContext.createMediaStreamSource(stream)
         const analyser = audioContext.createAnalyser()
 
@@ -131,13 +206,24 @@ export function useMicMetrics(): UseMicMetricsResult {
         analyser.smoothingTimeConstant = 0
         source.connect(analyser)
 
+        if (disposedRef.current) {
+          source.disconnect()
+          for (const track of stream.getTracks()) {
+            track.stop()
+          }
+          void audioContext.close()
+          return false
+        }
+
         streamRef.current = stream
         audioContextRef.current = audioContext
         sourceRef.current = source
         analyserRef.current = analyser
-        // Web Audio API가 요구하는 ArrayBuffer 기반 샘플 버퍼 생성
+
+        // Web Audio API용 ArrayBuffer 기반 샘플 버퍼 생성
         const sampleArrayBuffer = new ArrayBuffer(
-          analyser.fftSize * Float32Array.BYTES_PER_ELEMENT,
+          analyser.fftSize *
+            Float32Array.BYTES_PER_ELEMENT,
         )
         sampleBufferRef.current = new Float32Array(
           sampleArrayBuffer,
@@ -145,6 +231,23 @@ export function useMicMetrics(): UseMicMetricsResult {
         setError(null)
         return true
       } catch (caught) {
+        try {
+          source?.disconnect()
+        } catch {
+          // 초기화 실패 시 생성된 오디오 노드 정리
+        }
+        for (const track of stream?.getTracks() ?? []) {
+          track.stop()
+        }
+        if (
+          audioContext &&
+          audioContext.state !== 'closed'
+        ) {
+          void audioContext.close()
+        }
+
+        if (disposedRef.current) return false
+
         const exception = caught as DOMException
         if (
           exception.name === 'NotAllowedError' ||
@@ -172,103 +275,166 @@ export function useMicMetrics(): UseMicMetricsResult {
   /** 사용자 조작 기준 마이크 구간 시작. */
   const startUserSegment =
     useCallback(async (): Promise<boolean> => {
+      startRequestedRef.current = true
+      clearIdleReleaseTimer()
+
       if (activeSegmentRef.current) return true
-
-      const initialized = await ensureAudioPipeline()
-      if (!initialized) return false
-
-      const audioContext = audioContextRef.current
-      const analyser = analyserRef.current
-      const sampleBuffer = sampleBufferRef.current
-      if (!audioContext || !analyser || !sampleBuffer) {
-        setError('음성 분석기가 초기화되지 않았습니다.')
-        return false
+      if (startingPromiseRef.current) {
+        return startingPromiseRef.current
       }
 
-      if (audioContext.state === 'suspended') {
-        await audioContext.resume()
-      }
+      const startingPromise = (async () => {
+        const initialized = await ensureAudioPipeline()
+        if (!initialized) return false
 
-      const startedAtMs = performance.now()
-      activeSegmentRef.current = {
-        startedAtMs,
-        frames: [],
-      }
-      liveSilenceStateRef.current = {
-        noiseFloorRms: 0.003,
-        silenceStartedAtMs: startedAtMs,
-      }
-      setRecording(true)
-
-      intervalRef.current = window.setInterval(() => {
-        const activeSegment = activeSegmentRef.current
-        const currentAnalyser = analyserRef.current
-        const currentBuffer = sampleBufferRef.current
         if (
-          !activeSegment ||
-          !currentAnalyser ||
-          !currentBuffer
+          disposedRef.current ||
+          !startRequestedRef.current
         ) {
-          return
+          releaseAudioPipeline()
+          return false
         }
 
-        currentAnalyser.getFloatTimeDomainData(
-          currentBuffer,
-        )
-        const sampledAtMs = performance.now()
-        const rms = calculateRms(currentBuffer)
+        const audioContext = audioContextRef.current
+        const analyser = analyserRef.current
+        const sampleBuffer = sampleBufferRef.current
+        if (!audioContext || !analyser || !sampleBuffer) {
+          setError('음성 분석기가 초기화되지 않았습니다.')
+          releaseAudioPipeline()
+          return false
+        }
 
-        activeSegment.frames.push({
-          elapsed_ms: sampledAtMs - startedAtMs,
-          rms,
-        })
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume()
+        }
 
-        const liveState = liveSilenceStateRef.current
-        const voiceThreshold = Math.max(
-          0.006,
-          liveState.noiseFloorRms * 1.8,
-        )
-        const isVoiceFrame = rms >= voiceThreshold
+        if (
+          disposedRef.current ||
+          !startRequestedRef.current
+        ) {
+          releaseAudioPipeline()
+          return false
+        }
 
-        if (isVoiceFrame) {
-          // 마지막 발화 프레임 기준 침묵 시작 시각 갱신
-          liveState.silenceStartedAtMs = sampledAtMs
-        } else {
-          // 정적 환경 변화 반영을 위한 배경 소음 기준 완만한 보정
-          liveState.noiseFloorRms =
-            liveState.noiseFloorRms * 0.97 + rms * 0.03
+        const startedAtMs = performance.now()
+        activeSegmentRef.current = {
+          startedAtMs,
+          frames: [],
+        }
+        liveSilenceStateRef.current = {
+          noiseFloorRms: 0.003,
+          silenceStartedAtMs: startedAtMs,
+        }
+        setRecording(true)
 
+        // 이전 비정상 타이머 잔존 방지
+        clearSamplingInterval()
+        intervalRef.current = window.setInterval(() => {
+          const activeSegment =
+            activeSegmentRef.current
+          const currentAnalyser =
+            analyserRef.current
+          const currentBuffer =
+            sampleBufferRef.current
           if (
-            sampledAtMs - liveState.silenceStartedAtMs >= 5_000 &&
-            !longSilenceTipShownRef.current
+            !activeSegment ||
+            !currentAnalyser ||
+            !currentBuffer
           ) {
-            longSilenceTipShownRef.current = true
-            setLongSilenceSignal((previous) => previous + 1)
+            return
           }
-        }
-      }, SPEECH_METRIC_CONFIG.frameIntervalMs)
 
-      return true
-    }, [ensureAudioPipeline])
+          currentAnalyser.getFloatTimeDomainData(
+            currentBuffer,
+          )
+          const sampledAtMs = performance.now()
+          const rms = calculateRms(currentBuffer)
+
+          activeSegment.frames.push({
+            elapsed_ms: sampledAtMs - startedAtMs,
+            rms,
+          })
+
+          const liveState =
+            liveSilenceStateRef.current
+          const voiceThreshold = Math.max(
+            0.006,
+            liveState.noiseFloorRms * 1.8,
+          )
+          const isVoiceFrame = rms >= voiceThreshold
+
+          if (isVoiceFrame) {
+            // 마지막 발화 프레임 기준 침묵 시작 시각 갱신
+            liveState.silenceStartedAtMs =
+              sampledAtMs
+          } else {
+            // 정적 환경 변화 반영을 위한 배경 소음 기준 보정
+            liveState.noiseFloorRms =
+              liveState.noiseFloorRms * 0.97 +
+              rms * 0.03
+
+            if (
+              sampledAtMs -
+                liveState.silenceStartedAtMs >=
+                5_000 &&
+              !longSilenceTipShownRef.current
+            ) {
+              longSilenceTipShownRef.current = true
+              setLongSilenceSignal(
+                (previous) => previous + 1,
+              )
+            }
+          }
+        }, SPEECH_METRIC_CONFIG.frameIntervalMs)
+
+        return true
+      })()
+
+      startingPromiseRef.current = startingPromise
+
+      try {
+        return await startingPromise
+      } finally {
+        if (
+          startingPromiseRef.current ===
+          startingPromise
+        ) {
+          startingPromiseRef.current = null
+        }
+      }
+    }, [
+      clearIdleReleaseTimer,
+      clearSamplingInterval,
+      ensureAudioPipeline,
+      releaseAudioPipeline,
+    ])
 
   /** 사용자 조작 기준 마이크 구간 종료. */
   const stopUserSegment = useCallback(() => {
-    const activeSegment = activeSegmentRef.current
-    if (!activeSegment) return
-
+    startRequestedRef.current = false
     clearSamplingInterval()
-    const durationMs = Math.max(
-      0,
-      performance.now() - activeSegment.startedAtMs,
-    )
 
-    completedSegmentsRef.current.push({
-      duration_ms: Math.round(durationMs),
-      frames: activeSegment.frames,
-    })
+    const activeSegment = activeSegmentRef.current
+    if (activeSegment) {
+      const durationMs = Math.max(
+        0,
+        performance.now() -
+          activeSegment.startedAtMs,
+      )
+
+      completedSegmentsRef.current.push({
+        duration_ms: Math.round(durationMs),
+        frames: activeSegment.frames,
+      })
+    }
+
     activeSegmentRef.current = null
     setRecording(false)
-  }, [clearSamplingInterval])
+    scheduleAudioPipelineRelease()
+  }, [
+    clearSamplingInterval,
+    scheduleAudioPipelineRelease,
+  ])
 
   /** 현재 답변의 다중 마이크 구간 합산. */
   const finalizeAnswer = useCallback(
@@ -302,29 +468,16 @@ export function useMicMetrics(): UseMicMetricsResult {
   }, [stopUserSegment])
 
   useEffect(() => {
+    disposedRef.current = false
+
     return () => {
-      clearSamplingInterval()
+      disposedRef.current = true
+      startRequestedRef.current = false
       activeSegmentRef.current = null
       completedSegmentsRef.current = []
-
-      try {
-        sourceRef.current?.disconnect()
-      } catch {
-        // 이미 해제된 오디오 노드 무시
-      }
-
-      for (const track of streamRef.current?.getTracks() ?? []) {
-        track.stop()
-      }
-
-      void audioContextRef.current?.close()
-      sourceRef.current = null
-      analyserRef.current = null
-      audioContextRef.current = null
-      streamRef.current = null
-      sampleBufferRef.current = null
+      releaseAudioPipeline()
     }
-  }, [clearSamplingInterval])
+  }, [releaseAudioPipeline])
 
   return {
     available,
