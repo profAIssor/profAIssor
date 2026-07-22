@@ -71,6 +71,7 @@ export default function SparScreen({
 
   const startedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const answerInputRef = useRef<HTMLTextAreaElement>(null)
 
   // STT 용어 사전 재사용
   const termDict = useMemo(() => buildTermDictionary(script, slides), [script, slides])
@@ -169,6 +170,14 @@ export default function SparScreen({
       behavior: 'smooth',
     })
   }, [messages])
+
+  // 답변 제출 후(busy 종료) 다음 질문이 준비되면 답변창에 포커스를 되돌려,
+  // 매번 입력창을 다시 클릭하지 않고 연속으로 답할 수 있게 한다.
+  useEffect(() => {
+    if (!busy && question && !readyForReport) {
+      answerInputRef.current?.focus()
+    }
+  }, [busy, question, readyForReport])
 
   const submit = async () => {
     if (!question || !answer.trim() || busy || readyForReport) return
@@ -573,6 +582,7 @@ export default function SparScreen({
           )}
 
           <textarea
+            ref={answerInputRef}
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}
             onKeyDown={onKeyDown}
