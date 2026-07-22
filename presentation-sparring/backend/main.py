@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 import llm_client
+import pdf_extract
 import ppt_extract
 import prompts
 from personas import (
@@ -56,12 +57,23 @@ def health():
     return {"status": "ok", "provider": llm_client.PROVIDER}
 
 
-_MAX_PPT_SIZE = 20 * 1024 * 1024  # 20MB
-_PPTX_CONTENT_TYPES = {
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/octet-stream",  # many clients send this generically
-    "",
+_MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
+# Content types tolerated per extension. Browsers/OSes are inconsistent about
+# the exact MIME they attach, so "octet-stream"/"" are accepted for both.
+_UPLOAD_CONTENT_TYPES = {
+    "pptx": {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/octet-stream",
+        "",
+    },
+    "pdf": {
+        "application/pdf",
+        "application/x-pdf",
+        "application/octet-stream",
+        "",
+    },
 }
+_UNSUPPORTED_FORMAT_DETAIL = "지원하지 않는 파일 형식입니다. .pptx 또는 .pdf 파일만 업로드할 수 있습니다."
 
 
 @app.post("/api/slides/extract", response_model=SlideExtractResponse)
@@ -73,22 +85,24 @@ async def extract_slides_endpoint(file: UploadFile = File(...)):
             status_code=400,
             detail="구버전 .ppt 파일은 지원하지 않습니다. PowerPoint에서 .pptx로 저장 후 업로드해주세요.",
         )
-    if ext != "pptx":
-        raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. .pptx 파일만 업로드할 수 있습니다.")
-    if file.content_type and file.content_type not in _PPTX_CONTENT_TYPES:
-        raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. .pptx 파일만 업로드할 수 있습니다.")
+    if ext not in _UPLOAD_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail=_UNSUPPORTED_FORMAT_DETAIL)
+    if file.content_type and file.content_type not in _UPLOAD_CONTENT_TYPES[ext]:
+        raise HTTPException(status_code=400, detail=_UNSUPPORTED_FORMAT_DETAIL)
 
     content = await file.read()
-    if len(content) > _MAX_PPT_SIZE:
+    if len(content) > _MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=400, detail="파일 크기가 20MB를 초과합니다.")
 
+    extractor = pdf_extract if ext == "pdf" else ppt_extract
+    label = "PDF" if ext == "pdf" else "PPT"
     try:
-        slides = ppt_extract.extract_slides(content)
+        slides = extractor.extract_slides(content)
     except Exception:  # noqa: BLE001
-        logger.exception("PPT extraction failed for %s", filename)
+        logger.exception("%s extraction failed for %s", label, filename)
         raise HTTPException(
             status_code=400,
-            detail="PPT 파일을 읽는 중 오류가 발생했습니다. 파일이 손상되지 않았는지 확인해주세요.",
+            detail=f"{label} 파일을 읽는 중 오류가 발생했습니다. 파일이 손상되지 않았는지 확인해주세요.",
         )
 
     return SlideExtractResponse(slides=slides)
