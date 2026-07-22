@@ -196,6 +196,14 @@ class TranscriptTurn(BaseModel):
     rubric: Dict[str, str] = Field(default_factory=dict)
     speech_metrics: Optional[SpeechMetrics] = None
 
+    # 최초 무응답과 쉬운 재질문을 하나의 질문 슬롯으로 보존
+    retry_question: Optional[str] = None
+    retry_answer: Optional[str] = None
+    retry_speech_metrics: Optional[SpeechMetrics] = None
+
+    # 재질문에도 답하지 못했을 때 제공한 최종 개념 설명
+    final_explanation: Optional[str] = None
+
 
 RevisionActionType = Literal[
     "sentence_split",
@@ -230,6 +238,13 @@ class SlideCoverage(BaseModel):
     missing_point: Optional[str] = None
 
 
+class AnswerCoaching(BaseModel):
+    """질문 슬롯별 참고 답변."""
+
+    turn_index: int = Field(ge=0)
+    reference_answer: Optional[str] = None
+
+
 class ReportResponse(BaseModel):
     content_feedback: str
     delivery_feedback: str
@@ -242,4 +257,10 @@ class ReportResponse(BaseModel):
     speech_summary: Optional[SpeechSummary] = None
     speech_delivery_feedback: str = ""
     revisions: List[Revision] = Field(default_factory=list)
+    answer_coaching: List[AnswerCoaching] = Field(default_factory=list)
     answer_structure_tip: str = ""
+
+    # 리포트 화면의 자료 유무별 분기 지원
+    script_available: bool = True
+    slides_available: bool = True
+    slide_coverage_available: bool = True

@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { countRecognizedFillers } from '../lib/speechMetrics'
 
 /** lib.dom에 포함되지 않은 Web Speech API 최소 타입. */
 interface SpeechRecognitionResultLike {
@@ -67,7 +68,10 @@ interface SpeechRecognitionHook {
   /** 현재 답변에서 누적된 원본 final STT 조회. */
   getTranscript: () => string
 
-  /** 다음 답변을 위한 원본 final STT 초기화. */
+  /** final·interim 결과에서 중복 없이 확인된 필러 최소치 조회. */
+  getRecognizedFillerMinimum: () => number
+
+  /** 다음 답변을 위한 원본 final STT와 필러 버퍼 초기화. */
   resetTranscript: () => void
 }
 
@@ -118,6 +122,11 @@ export function useSpeechRecognition({
   const shouldListenRef = useRef(false)
   const listeningRef = useRef(false)
   const answerTranscriptRef = useRef('')
+  const answerFillerMinimumRef = useRef(0)
+  const activeFillerMaxByResultRef =
+    useRef<Map<number, number>>(new Map())
+  const committedResultIndicesRef =
+    useRef<Set<number>>(new Set())
   const pendingFlushRef =
     useRef<PendingFlush | null>(null)
 
@@ -125,6 +134,17 @@ export function useSpeechRecognition({
   const onInterimRef = useRef(onInterim)
   onFinalRef.current = onFinal
   onInterimRef.current = onInterim
+
+  /** 현재 Chrome 인식 주기의 미확정 interim 필러 최소치 확정. */
+  const commitRecognitionCycle = useCallback(() => {
+    for (const [index, count] of activeFillerMaxByResultRef.current) {
+      if (committedResultIndicesRef.current.has(index)) continue
+      answerFillerMinimumRef.current += count
+    }
+
+    activeFillerMaxByResultRef.current.clear()
+    committedResultIndicesRef.current.clear()
+  }, [])
 
   /** 누적 STT 반환 및 flush 대기 해제. */
   const resolvePendingFlush = useCallback(() => {
@@ -154,18 +174,40 @@ export function useSpeechRecognition({
         index += 1
       ) {
         const result = event.results[index]
-        const text = result[0].transcript.trim()
-        if (!text) continue
+        const recognizedText = result[0].transcript.trim()
+        const currentFillerCount =
+          countRecognizedFillers(recognizedText)
+        const previousMaximum =
+          activeFillerMaxByResultRef.current.get(index) ?? 0
+        const observedMaximum = Math.max(
+          previousMaximum,
+          currentFillerCount,
+        )
+
+        activeFillerMaxByResultRef.current.set(
+          index,
+          observedMaximum,
+        )
 
         if (result.isFinal) {
+          if (
+            !committedResultIndicesRef.current.has(index)
+          ) {
+            answerFillerMinimumRef.current += observedMaximum
+            committedResultIndicesRef.current.add(index)
+          }
+          activeFillerMaxByResultRef.current.delete(index)
+
+          if (!recognizedText) continue
+
           answerTranscriptRef.current = (
             answerTranscriptRef.current.trim()
-              ? `${answerTranscriptRef.current.trimEnd()} ${text}`
-              : text
+              ? `${answerTranscriptRef.current.trimEnd()} ${recognizedText}`
+              : recognizedText
           )
-          onFinalRef.current(text)
-        } else {
-          interim += `${text} `
+          onFinalRef.current(recognizedText)
+        } else if (recognizedText) {
+          interim += `${recognizedText} `
         }
       }
 
@@ -182,6 +224,8 @@ export function useSpeechRecognition({
     }
 
     recognition.onend = () => {
+      commitRecognitionCycle()
+
       if (shouldListenRef.current) {
         try {
           recognition.start()
@@ -217,7 +261,7 @@ export function useSpeechRecognition({
       recognitionRef.current = null
       resolvePendingFlush()
     }
-  }, [lang, resolvePendingFlush])
+  }, [commitRecognitionCycle, lang, resolvePendingFlush])
 
   /** 사용자 조작 기준 STT 시작. */
   const start = useCallback((): boolean => {
@@ -319,9 +363,28 @@ export function useSpeechRecognition({
     [],
   )
 
-  /** 현재 답변 원본 final STT 초기화. */
+  /** 현재 답변에서 중복 없이 확인된 필러 최소치 조회. */
+  const getRecognizedFillerMinimum = useCallback(
+    () => {
+      const activeMinimum = Array.from(
+        activeFillerMaxByResultRef.current.entries(),
+      ).reduce((sum, [index, count]) => {
+        return committedResultIndicesRef.current.has(index)
+          ? sum
+          : sum + count
+      }, 0)
+
+      return answerFillerMinimumRef.current + activeMinimum
+    },
+    [],
+  )
+
+  /** 현재 답변 원본 final STT와 필러 버퍼 초기화. */
   const resetTranscript = useCallback(() => {
     answerTranscriptRef.current = ''
+    answerFillerMinimumRef.current = 0
+    activeFillerMaxByResultRef.current.clear()
+    committedResultIndicesRef.current.clear()
     onInterimRef.current?.('')
   }, [])
 
@@ -334,6 +397,7 @@ export function useSpeechRecognition({
     toggle,
     stopAndFlush,
     getTranscript,
+    getRecognizedFillerMinimum,
     resetTranscript,
   }
 }

@@ -1,4 +1,4 @@
-import { Mic, Send, Square } from 'lucide-react'
+import { Lightbulb, Mic, Send, Square } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { evaluateAnswer, fetchQuestion } from '../api'
 import { useMicMetrics } from '../hooks/useMicMetrics'
@@ -16,6 +16,7 @@ import type {
   QuestionRole,
   QuestionType,
   Slide,
+  SpeechMetrics,
   TranscriptTurn,
 } from '../types'
 
@@ -38,6 +39,16 @@ interface QuestionState {
   questionFocus: string
   contextSlides: number[]
   expectedAnswerPoints: string[]
+}
+
+
+interface PendingUnknownAttempt {
+  question: string
+  questionType: QuestionType
+  answer: string
+  supplement: string | null
+  relatedSlides: number[]
+  speechMetrics?: SpeechMetrics
 }
 
 const QUESTION_STOPWORDS = new Set([
@@ -113,6 +124,81 @@ function resolveNextAction(
   return currentTurn < maxTurns ? 'move_to_new_root' : 'finish'
 }
 
+
+const GENERAL_RECOVERY_TIPS = [
+  (
+    '질문을 한 문장으로 짧게 되짚으며 ' +
+    '“질문하신 핵심은 …로 이해했습니다.”라고 말해 보세요. ' +
+    '질문을 정확히 확인하면서 답변을 정리할 시간을 확보할 수 있습니다.'
+  ),
+  (
+    '급하게 말을 채우지 말고 한두 박자 쉬어도 괜찮습니다. ' +
+    '숨을 천천히 내쉰 뒤 “먼저 결론부터 말씀드리면…”으로 시작해 보세요.'
+  ),
+  (
+    '바로 답이 떠오르지 않으면 “두 가지로 나누어 말씀드리겠습니다.”라고 ' +
+    '답변 범위를 먼저 정한 뒤, 첫 번째 내용부터 천천히 이어가 보세요.'
+  ),
+  (
+    '질문이 넓거나 의미가 애매하면 ' +
+    '“말씀하신 부분을 … 관점으로 이해하면 될까요?”라고 확인해도 됩니다. ' +
+    '질문을 다시 확인하는 것은 회피가 아니라 정확한 답변을 위한 과정입니다.'
+  ),
+  (
+    '정확한 세부사항이 떠오르지 않으면 ' +
+    '“정확한 수치는 추가 확인이 필요하지만, 현재 말씀드릴 수 있는 범위는 …입니다.”라고 ' +
+    '아는 범위와 확인이 필요한 범위를 나누어 답해 보세요.'
+  ),
+  (
+    '답변을 짧게 정리하려면 결론→이유→예시→결론 순서를 사용해 보세요. ' +
+    '우선 결론 한 문장만 말하면 다음 내용을 이어가기 쉬워집니다.'
+  ),
+] as const
+
+const SLIDE_RECOVERY_TIPS = [
+  (
+    '관련 슬라이드로 시선을 옮기며 ' +
+    '“자료를 기준으로 순서대로 설명드리겠습니다.”라고 말해 보세요. ' +
+    '해당 부분을 손으로 가리키며 답변을 이어가도 좋습니다.'
+  ),
+  (
+    '관련 슬라이드를 찾는 동안 ' +
+    '“질문과 연결되는 자료를 보면서 설명드리겠습니다.”라고 안내해 보세요. ' +
+    '슬라이드를 확인하는 짧은 시간도 자연스러운 발표 진행의 일부입니다.'
+  ),
+  (
+    '표나 그림이 있다면 제목이나 축을 먼저 가리키며 ' +
+    '“이 자료에서 먼저 보셔야 할 부분은 …입니다.”라고 시작해 보세요. ' +
+    '시각 자료를 기준점으로 삼으면 말의 흐름을 다시 잡기 쉽습니다.'
+  ),
+] as const
+
+/** 내용 힌트 없이 발표 진행 시간을 확보하는 침묵 회복 팁 생성. */
+function buildLongSilenceTip(
+  questionState: QuestionState,
+  tipSequence: number,
+): string {
+  const tips =
+    questionState.contextSlides.length > 0
+      ? [
+          ...GENERAL_RECOVERY_TIPS,
+          ...SLIDE_RECOVERY_TIPS,
+        ]
+      : [...GENERAL_RECOVERY_TIPS]
+
+  const questionSeed = Array.from(
+    questionState.question,
+  ).reduce(
+    (sum, character) =>
+      sum + (character.codePointAt(0) ?? 0),
+    0,
+  )
+  const selectedIndex =
+    Math.abs(questionSeed + tipSequence) % tips.length
+
+  return tips[selectedIndex]
+}
+
 /** 발표 자료 기반 질의응답 진행 및 질문 역할별 상태 관리. */
 export default function SparScreen({
   script,
@@ -133,9 +219,10 @@ export default function SparScreen({
   const [error, setError] = useState<string | null>(null)
   const [interim, setInterim] = useState('')
   const [readyForReport, setReadyForReport] = useState(false)
-  const [unknownSupplement, setUnknownSupplement] = useState<string | null>(null)
 
   const transcriptRef = useRef<TranscriptTurn[]>([])
+  const pendingUnknownAttemptRef =
+    useRef<PendingUnknownAttempt | null>(null)
   // 신규 기본 질문의 전역 중복 방지 목록
   const askedRootQuestionsRef = useRef<string[]>([])
   // 현재 기본 질문 흐름 내부의 반복 방지 목록
@@ -144,6 +231,7 @@ export default function SparScreen({
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const answerInputRef = useRef<HTMLTextAreaElement | null>(null)
   const answerRef = useRef('')
+  const handledLongSilenceSignalRef = useRef(0)
 
   const browserSupport = useMemo(() => getBrowserSupport(), [])
   const termDict = useMemo(
@@ -155,6 +243,7 @@ export default function SparScreen({
     available: metricAvailable,
     recording: metricRecording,
     error: metricError,
+    longSilenceSignal,
     startUserSegment,
     stopUserSegment,
     finalizeAnswer,
@@ -168,6 +257,7 @@ export default function SparScreen({
     start: startMic,
     stopAndFlush,
     getTranscript,
+    getRecognizedFillerMinimum,
     resetTranscript,
   } = useSpeechRecognition({
     onFinal: (text) => {
@@ -222,7 +312,7 @@ export default function SparScreen({
     }
     setTurn(targetTurn)
     setQuestionState(nextState)
-    setUnknownSupplement(null)
+    pendingUnknownAttemptRef.current = null
     currentQuestionChainRef.current = [response.question]
     registerRootQuestion(response.question)
     pushMessage({
@@ -264,7 +354,7 @@ export default function SparScreen({
     if (nextPersonaIndex < personaIds.length) {
       setPersonaIndex(nextPersonaIndex)
       setQuestionState(null)
-      setUnknownSupplement(null)
+      pendingUnknownAttemptRef.current = null
       currentQuestionChainRef.current = []
       await loadFreshQuestion(nextPersonaIndex, 0)
       return
@@ -277,7 +367,7 @@ export default function SparScreen({
   /** 현재 질문 슬롯 종료 뒤 새 기본 질문 또는 다음 평가자 이동. */
   const advanceAfterCurrentQuestion = async (currentTurn: number) => {
     const nextTurn = currentTurn + 1
-    setUnknownSupplement(null)
+    pendingUnknownAttemptRef.current = null
     if (nextTurn <= maxTurns) {
       await loadFreshQuestion(personaIndex, nextTurn)
       return
@@ -310,6 +400,42 @@ export default function SparScreen({
       stopUserSegment()
     }
   }, [metricRecording, micError, stopUserSegment])
+
+
+  useEffect(() => {
+    if (
+      longSilenceSignal <= handledLongSilenceSignalRef.current
+    ) {
+      return
+    }
+
+    if (
+      !metricRecording ||
+      busy ||
+      !questionState
+    ) {
+      return
+    }
+
+    handledLongSilenceSignalRef.current = longSilenceSignal
+    setMessages((previous) => [
+      ...previous,
+      {
+        role: 'tip',
+        personaId: activePersonaId,
+        text: buildLongSilenceTip(
+          questionState,
+          longSilenceSignal,
+        ),
+      },
+    ])
+  }, [
+    activePersonaId,
+    busy,
+    longSilenceSignal,
+    metricRecording,
+    questionState,
+  ])
 
   /** textarea와 ref의 답변 동기화. */
   const updateAnswer = (value: string) => {
@@ -353,9 +479,12 @@ export default function SparScreen({
     const studentAnswer = answerRef.current.trim()
     if (!studentAnswer) return
 
+    const recognizedFillerMinimum =
+      getRecognizedFillerMinimum()
     const speechMetrics = finalizeAnswer(
       rawFinalSttText,
       studentAnswer,
+      recognizedFillerMinimum,
     )
     resetTranscript()
 
@@ -398,21 +527,31 @@ export default function SparScreen({
       )
 
       if (action === 'retry_after_unknown' && evaluation.retry_question) {
-        // 최초 무응답의 음성 지표는 기존 transcript 정책에 맞춰 폐기
+        pendingUnknownAttemptRef.current = {
+          question: currentState.question,
+          questionType: currentState.questionType,
+          answer: studentAnswer,
+          supplement: evaluation.supplement,
+          relatedSlides: evaluation.related_slides,
+          ...(speechMetrics
+            ? { speechMetrics }
+            : {}),
+        }
         resetSpeechMetrics()
+
         pushMessage({
           role: 'verdict',
           personaId,
           text: '아래 기본 아이디어를 바탕으로 현재 질문의 답을 한 단계씩 유추해 보세요.',
           answerStatus: 'unknown',
           supplement: evaluation.supplement,
+          supplementTitle: '생각해 볼 기본 아이디어',
           relatedSlides: evaluation.related_slides,
         })
 
         const retryType =
           evaluation.retry_question_type ?? currentState.questionType
         const retryQuestion = evaluation.retry_question
-        setUnknownSupplement(evaluation.supplement)
         setQuestionState({
           ...currentState,
           question: retryQuestion,
@@ -439,38 +578,89 @@ export default function SparScreen({
       }
 
       const isUnknown = evaluation.answer_status === 'unknown'
-      pushMessage({
-        role: 'verdict',
-        personaId,
-        text: isUnknown
-          ? '이 질문은 여기까지 하고 다음 기본 질문으로 넘어가겠습니다.'
-          : `평가: ${evaluation.verdict} ✅ ${evaluation.strengths} ⚠️ ${evaluation.gaps}`,
-        rubric: isUnknown ? undefined : evaluation.rubric,
-        answerStatus: evaluation.answer_status,
-      })
+      const pendingUnknown =
+        currentState.questionRole === 'retry'
+          ? pendingUnknownAttemptRef.current
+          : null
 
-      // 무응답 재질문은 최초 무응답과 합쳐 질문 슬롯 한 개로 기록
-      transcriptRef.current.push({
-        persona_id: personaId,
-        question: currentState.question,
-        question_type: currentState.questionType,
-        question_role: currentState.questionRole,
-        answer: studentAnswer,
-        verdict: evaluation.verdict,
-        strengths: evaluation.strengths,
-        gaps: evaluation.gaps,
-        answer_status: evaluation.answer_status,
-        supplement:
-          currentState.questionRole === 'retry' ? unknownSupplement : null,
-        related_slides:
-          currentState.questionRole === 'retry'
-            ? currentState.contextSlides
-            : [],
-        rubric: evaluation.rubric,
-        ...(speechMetrics
-          ? { speech_metrics: speechMetrics }
-          : {}),
-      })
+      if (isUnknown && currentState.questionRole === 'retry') {
+        pushMessage({
+          role: 'verdict',
+          personaId,
+          text:
+            '재질문에도 답변하지 못했습니다. 아래 개념 설명을 확인한 뒤 이 질문과 관련된 내용을 다시 학습해 주세요.',
+          answerStatus: 'unknown',
+          supplement: evaluation.supplement,
+          supplementTitle: '개념 정리',
+          learningNote:
+            evaluation.gaps ||
+            '이 질문과 관련된 개념을 발표 전에 다시 학습해 주세요.',
+          relatedSlides: evaluation.related_slides,
+        })
+      } else {
+        pushMessage({
+          role: 'verdict',
+          personaId,
+          text: isUnknown
+            ? '현재 답변에서는 질문의 핵심을 확인하기 어려웠습니다.'
+            : `평가: ${evaluation.verdict} ✅ ${evaluation.strengths} ⚠️ ${evaluation.gaps}`,
+          rubric: isUnknown ? undefined : evaluation.rubric,
+          answerStatus: evaluation.answer_status,
+        })
+      }
+
+      if (pendingUnknown) {
+        transcriptRef.current.push({
+          persona_id: personaId,
+          question: pendingUnknown.question,
+          question_type: pendingUnknown.questionType,
+          question_role: 'retry',
+          answer: pendingUnknown.answer,
+          verdict: evaluation.verdict,
+          strengths: evaluation.strengths,
+          gaps: evaluation.gaps,
+          answer_status: evaluation.answer_status,
+          supplement: pendingUnknown.supplement,
+          related_slides: Array.from(
+            new Set([
+              ...pendingUnknown.relatedSlides,
+              ...evaluation.related_slides,
+            ]),
+          ),
+          rubric: evaluation.rubric,
+          ...(pendingUnknown.speechMetrics
+            ? { speech_metrics: pendingUnknown.speechMetrics }
+            : {}),
+          retry_question: currentState.question,
+          retry_answer: studentAnswer,
+          ...(speechMetrics
+            ? { retry_speech_metrics: speechMetrics }
+            : {}),
+          final_explanation:
+            isUnknown && evaluation.supplement
+              ? evaluation.supplement
+              : null,
+        })
+        pendingUnknownAttemptRef.current = null
+      } else {
+        transcriptRef.current.push({
+          persona_id: personaId,
+          question: currentState.question,
+          question_type: currentState.questionType,
+          question_role: currentState.questionRole,
+          answer: studentAnswer,
+          verdict: evaluation.verdict,
+          strengths: evaluation.strengths,
+          gaps: evaluation.gaps,
+          answer_status: evaluation.answer_status,
+          supplement: null,
+          related_slides: [],
+          rubric: evaluation.rubric,
+          ...(speechMetrics
+            ? { speech_metrics: speechMetrics }
+            : {}),
+        })
+      }
 
       if (action === 'ask_followup' && evaluation.followup) {
         const nextTurn = currentTurn + 1
@@ -488,7 +678,6 @@ export default function SparScreen({
         const followupType =
           evaluation.followup_question_type ?? currentState.questionType
         setTurn(nextTurn)
-        setUnknownSupplement(null)
         setQuestionState({
           ...currentState,
           question: followup,
@@ -602,6 +791,17 @@ export default function SparScreen({
         {messages.map((message, index) => {
           const messagePersona = getPersona(message.personaId)
 
+          if (message.role === 'tip') {
+            return (
+              <div key={index} className="flex justify-center">
+                <div className="flex max-w-[92%] items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900 shadow-sm">
+                  <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <span>{message.text}</span>
+                </div>
+              </div>
+            )
+          }
+
           if (message.role === 'answer') {
             return (
               <div key={index} className="flex justify-end">
@@ -626,13 +826,21 @@ export default function SparScreen({
                   {message.answerStatus === 'unknown' && message.supplement && (
                     <div className="rounded-lg border border-indigo-100 bg-white px-3.5 py-3">
                       <div className="mb-1.5 text-sm font-bold text-indigo-700">
-                        생각해 볼 기본 아이디어
+                        {message.supplementTitle ??
+                          '생각해 볼 기본 아이디어'}
                       </div>
                       <div className="whitespace-pre-wrap text-slate-700">
                         {message.supplement}
                       </div>
                     </div>
                   )}
+
+                  {message.answerStatus === 'unknown' &&
+                    message.learningNote && (
+                      <div className="rounded-lg border border-amber-100 bg-amber-50 px-3.5 py-2.5 text-sm font-semibold text-amber-800">
+                        {message.learningNote}
+                      </div>
+                    )}
 
                   {message.answerStatus === 'unknown' && relatedSlides.length > 0 && (
                     <div className="text-sm text-slate-600">
@@ -734,19 +942,19 @@ export default function SparScreen({
           </button>
         </div>
       ) : (
-        <div className="sticky bottom-0 z-10 shrink-0 space-y-2 rounded-2xl border border-slate-200/80 bg-white/95 p-2.5 shadow-lg backdrop-blur sm:p-3">
+        <div className="sticky bottom-0 z-10 flex shrink-0 flex-col gap-2 rounded-2xl border border-slate-200/80 bg-white/95 p-2.5 shadow-lg backdrop-blur sm:p-3">
           {listening && (
             <div className="flex min-w-0 items-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3.5 py-2.5 text-sm text-rose-700">
               <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-rose-500" />
               <span className="shrink-0 font-semibold">받아쓰는 중…</span>
-              <span className="min-w-0 flex-1 truncate text-slate-600">
-                {interim || '말해 보세요.'}
+              <span className="min-w-0 truncate text-slate-500">
+                {interim || '(말해 보세요)'}
               </span>
             </div>
           )}
 
           <div className="flex gap-2">
-            {sttSupported && (
+          {sttSupported && (
             <button
               type="button"
               data-testid="mic-btn"

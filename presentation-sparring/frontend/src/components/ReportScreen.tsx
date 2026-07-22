@@ -17,6 +17,7 @@ import { loadSessions } from '../lib/sessionStore'
 import { formatMinutes } from '../lib/timing'
 import { getPersona } from '../personas'
 import type {
+  AnswerCoaching,
   Report,
   RevisionActionType,
   SpeechMetrics,
@@ -49,25 +50,55 @@ export default function ReportScreen({
   transcript,
   onRestart,
 }: Props) {
+  const scriptAvailable =
+    report.script_available ?? report.word_count > 0
+  const slidesAvailable =
+    report.slides_available ?? report.slide_coverage.length > 0
+  const coverageAvailable =
+    report.slide_coverage_available ??
+    (scriptAvailable && slidesAvailable)
+
   // 대본 어절 수 기준 예상 발표 시간 계산
   const estMinutes =
-    report.word_count > 0 ? report.word_count / 120 : 0
+    scriptAvailable && report.word_count > 0
+      ? report.word_count / 120
+      : 0
   const estSeconds = Math.round(estMinutes * 60)
-  const uncovered = report.slide_coverage.filter(
-    (slide) => !slide.covered,
-  )
+  const uncovered = coverageAvailable
+    ? report.slide_coverage.filter((slide) => !slide.covered)
+    : []
 
   // 현재 세션 저장 이후의 이전 세션 비교
   const previous = loadSessions()[1] ?? null
-  const secondsDelta = previous
-    ? estSeconds - Math.round(previous.estMinutes * 60)
-    : null
-  const coverageDelta = previous
-    ? coverageRate(report.slide_coverage) -
-      coverageRate(previous.report.slide_coverage)
-    : null
+  const previousScriptAvailable = previous
+    ? previous.report.script_available ??
+      previous.report.word_count > 0
+    : false
+  const previousCoverageAvailable = previous
+    ? previous.report.slide_coverage_available ??
+      previous.report.slide_coverage.length > 0
+    : false
+
+  const secondsDelta =
+    previous && scriptAvailable && previousScriptAvailable
+      ? estSeconds -
+        Math.round(previous.estMinutes * 60)
+      : null
+  const coverageDelta =
+    previous && coverageAvailable && previousCoverageAvailable
+      ? coverageRate(report.slide_coverage) -
+        coverageRate(previous.report.slide_coverage)
+      : null
 
   const speechSummary = report.speech_summary ?? null
+  const coachingByTurn = new Map(
+    (report.answer_coaching ?? []).map(
+      (coaching) => [
+        coaching.turn_index,
+        coaching,
+      ],
+    ),
+  )
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -97,7 +128,12 @@ export default function ReportScreen({
         ) : (
           <div className="space-y-3">
             {transcript.map((turn, index) => (
-              <TurnCard key={index} index={index} turn={turn} />
+              <TurnCard
+                key={index}
+                index={index}
+                turn={turn}
+                coaching={coachingByTurn.get(index)}
+              />
             ))}
           </div>
         )}
@@ -164,7 +200,7 @@ export default function ReportScreen({
           )}
 
           <p className="text-xs leading-relaxed text-slate-500">
-            필러는 Chrome final STT에 명확히 남은 값만 계산하므로 실제
+            필러는 Chrome STT 처리 중 명확히 확인된 값만 계산하므로 실제
             사용 횟수보다 적게 표시될 수 있습니다.
           </p>
         </section>
@@ -179,7 +215,13 @@ export default function ReportScreen({
           </span>
         </h2>
 
-        {uncovered.length === 0 ? (
+        {!coverageAvailable ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-600">
+            {!scriptAvailable
+              ? '발표 대본이 없어 슬라이드의 핵심이 실제 발표에서 전달되었는지 판단하지 못했습니다.'
+              : '슬라이드가 없어 대본과 슬라이드의 커버리지를 판단하지 못했습니다.'}
+          </div>
+        ) : uncovered.length === 0 ? (
           <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm font-semibold text-emerald-700">
             ✅ 모든 슬라이드의 핵심이 대본에서 언급되었습니다.
           </div>
@@ -202,34 +244,44 @@ export default function ReportScreen({
           </div>
         )}
 
-        <div className="flex flex-wrap gap-2 pt-1">
-          {report.slide_coverage.map((slide) => (
-            <span
-              key={slide.index}
-              className={
-                'rounded-lg px-3 py-1 text-xs font-medium ' +
-                (slide.covered
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-amber-50 text-amber-700')
-              }
-            >
-              슬라이드 {slide.index}{' '}
-              {slide.covered ? '✓ 전달됨' : '✗ 미언급'}
-            </span>
-          ))}
-        </div>
+        {coverageAvailable && (
+          <div className="flex flex-wrap gap-2 pt-1">
+            {report.slide_coverage.map((slide) => (
+              <span
+                key={slide.index}
+                className={
+                  'rounded-lg px-3 py-1 text-xs font-medium ' +
+                  (slide.covered
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : 'bg-amber-50 text-amber-700')
+                }
+              >
+                슬라이드 {slide.index}{' '}
+                {slide.covered ? '✓ 전달됨' : '✗ 미언급'}
+              </span>
+            ))}
+          </div>
+        )}
       </section>
 
-      {report.revisions && report.revisions.length > 0 && (
-        <section className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
-          <h2 className="flex items-center gap-2 text-lg font-bold text-slate-800">
-            <ListChecks className="h-5 w-5 text-indigo-600" />
-            대본 수정 제안
-            <span className="text-xs font-normal text-slate-400">
-              (관찰 → 영향 → 수정 행동 → 예시 순서)
-            </span>
-          </h2>
+      <section className="space-y-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
+        <h2 className="flex items-center gap-2 text-lg font-bold text-slate-800">
+          <ListChecks className="h-5 w-5 text-indigo-600" />
+          대본 수정 제안
+          <span className="text-xs font-normal text-slate-400">
+            (발표 대본에 실제로 적힌 문장만 대상)
+          </span>
+        </h2>
 
+        {!scriptAvailable ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-600">
+            발표 대본이 없어 대본 수정 제안을 제공하지 못했습니다.
+          </div>
+        ) : !report.revisions || report.revisions.length === 0 ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            발표 대본에서 명확한 수정 지점을 확인하지 못했습니다.
+          </div>
+        ) : (
           <div className="space-y-3">
             {report.revisions.map((revision, index) => (
               <div
@@ -249,7 +301,7 @@ export default function ReportScreen({
 
                 <p className="text-sm text-slate-700">
                   <span className="font-semibold text-slate-500">
-                    관찰 ·{' '}
+                    대본 원문 ·{' '}
                   </span>
                   {revision.observation}
                 </p>
@@ -271,8 +323,8 @@ export default function ReportScreen({
               </div>
             ))}
           </div>
-        </section>
-      )}
+        )}
+      </section>
 
       {report.answer_structure_tip && (
         <div className="flex items-start gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4">
@@ -321,7 +373,7 @@ export default function ReportScreen({
               ? `최소 ${speechSummary.recognized_filler_count}회`
               : '미측정'
           }
-          hint="final STT 인식 하한선"
+          hint="STT 인식 하한선"
         />
         <Metric
           label="총 어절 수"
@@ -330,8 +382,16 @@ export default function ReportScreen({
         />
         <Metric
           label="예상 발표 시간"
-          value={formatMinutes(estMinutes)}
-          hint="약 120어절/분 기준"
+          value={
+            scriptAvailable
+              ? formatMinutes(estMinutes)
+              : '—'
+          }
+          hint={
+            scriptAvailable
+              ? '약 120어절/분 기준'
+              : '발표 대본 없음'
+          }
           delta={
             secondsDelta == null
               ? null
@@ -344,8 +404,18 @@ export default function ReportScreen({
         />
         <Metric
           label="슬라이드 커버리지"
-          value={`${coverageRate(report.slide_coverage)}%`}
-          hint="대본에서 전달된 비율"
+          value={
+            coverageAvailable
+              ? `${coverageRate(report.slide_coverage)}%`
+              : '—'
+          }
+          hint={
+            coverageAvailable
+              ? '대본에서 전달된 비율'
+              : !scriptAvailable
+                ? '발표 대본 없음'
+                : '슬라이드 없음'
+          }
           delta={
             coverageDelta == null
               ? null
@@ -403,16 +473,18 @@ function SummaryRow({
 function TurnCard({
   index,
   turn,
+  coaching,
 }: {
   index: number
   turn: TranscriptTurn
+  coaching?: AnswerCoaching
 }) {
   const persona = getPersona(turn.persona_id)
   const rubricEntries = Object.entries(turn.rubric ?? {})
-  const speech = turn.speech_metrics
+  const hasRetry = Boolean(turn.retry_question)
 
   return (
-    <div className="space-y-2.5 rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
+    <div className="space-y-3 rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
       <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-600">
         <span>{persona.emoji}</span>
         {persona.name}
@@ -421,22 +493,76 @@ function TurnCard({
         </span>
       </div>
 
-      <p className="text-sm font-semibold text-slate-800">
-        {turn.question}
-      </p>
+      <QuestionAttempt
+        label={hasRetry ? '원질문' : '질문'}
+        question={turn.question}
+        answer={turn.answer}
+        metrics={turn.speech_metrics}
+      />
 
-      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-600">
-        {turn.answer}
-      </div>
+      {hasRetry && turn.supplement && (
+        <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2.5">
+          <div className="text-[11px] font-bold text-indigo-700">
+            제공된 힌트
+          </div>
+          <p className="mt-1 text-sm leading-relaxed text-slate-700">
+            {turn.supplement}
+          </p>
+          {turn.related_slides &&
+            turn.related_slides.length > 0 && (
+              <p className="mt-1.5 text-xs text-slate-500">
+                관련 발표 자료:{' '}
+                {turn.related_slides
+                  .map((slide) => `${slide}번 슬라이드`)
+                  .join(', ')}
+              </p>
+            )}
+        </div>
+      )}
 
-      {speech && <TurnSpeechMetrics metrics={speech} />}
+      {hasRetry && turn.retry_question && (
+        <QuestionAttempt
+          label="쉬운 재질문"
+          question={turn.retry_question}
+          answer={turn.retry_answer || '(답변 없음)'}
+          metrics={turn.retry_speech_metrics}
+        />
+      )}
+
+      {coaching?.reference_answer ? (
+        <div className="rounded-lg border border-emerald-100 bg-emerald-50/70 px-3 py-2.5">
+          <div className="text-[11px] font-bold text-emerald-800">
+            참고 답변
+          </div>
+          <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-emerald-950">
+            {coaching.reference_answer}
+          </p>
+          <p className="mt-2 text-xs text-emerald-700">
+            발표 자료를 기준으로 구성한 참고용 답변입니다.
+          </p>
+        </div>
+      ) : (
+        turn.final_explanation && (
+          <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2.5">
+            <div className="text-[11px] font-bold text-amber-800">
+              개념 정리
+            </div>
+            <p className="mt-1 text-sm leading-relaxed text-amber-950">
+              {turn.final_explanation}
+            </p>
+            <p className="mt-2 text-xs font-semibold text-amber-800">
+              이 질문과 관련된 개념을 발표 전에 다시 학습해 주세요.
+            </p>
+          </div>
+        )
+      )}
 
       <div className="space-y-1.5 rounded-lg bg-white/70 px-3 py-2 text-xs leading-relaxed text-slate-600">
         <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-          총평
+          최종 평가
         </div>
         <p>{turn.verdict}</p>
-        <p>✅ {turn.strengths}</p>
+        {turn.strengths && <p>✅ {turn.strengths}</p>}
         <p>⚠️ {turn.gaps}</p>
       </div>
 
@@ -459,6 +585,34 @@ function TurnCard({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function QuestionAttempt({
+  label,
+  question,
+  answer,
+  metrics,
+}: {
+  label: string
+  question: string
+  answer: string
+  metrics?: SpeechMetrics
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        {label}
+      </div>
+      <p className="text-sm font-semibold text-slate-800">
+        {question}
+      </p>
+      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-600">
+        {answer}
+      </div>
+      {metrics && <TurnSpeechMetrics metrics={metrics} />}
+
     </div>
   )
 }

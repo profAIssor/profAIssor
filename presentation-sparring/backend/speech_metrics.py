@@ -47,12 +47,20 @@ def _volume_status(volume_variation_db: Optional[float]):
 def build_speech_summary(
     transcript: List[TranscriptTurn],
 ) -> Optional[SpeechSummary]:
-    """음성 지표가 존재하는 답변의 세션 단위 가중 집계."""
-    measured: List[SpeechMetrics] = [
-        turn.speech_metrics
-        for turn in transcript
-        if turn.speech_metrics is not None
-    ]
+    """원질문과 쉬운 재질문 답변을 포함한 세션 단위 가중 집계."""
+    measured: List[SpeechMetrics] = []
+    total_answer_count = 0
+
+    for turn in transcript:
+        total_answer_count += 1
+        if turn.speech_metrics is not None:
+            measured.append(turn.speech_metrics)
+
+        if turn.retry_question:
+            total_answer_count += 1
+            if turn.retry_speech_metrics is not None:
+                measured.append(turn.retry_speech_metrics)
+
     if not measured:
         return None
 
@@ -121,7 +129,7 @@ def build_speech_summary(
     return SpeechSummary(
         measured_answer_count=len(measured),
         reliable_answer_count=len(reliable),
-        total_answer_count=len(transcript),
+        total_answer_count=total_answer_count,
         total_voiced_duration_ms=total_voiced_duration_ms,
         session_pace_wpm=_round_optional(session_pace_wpm),
         pace_status=_pace_status(session_pace_wpm),
@@ -213,7 +221,7 @@ def build_speech_delivery_feedback(
 
     if summary.recognized_filler_count > 0:
         observations.append(
-            f"Chrome final STT에서 명확히 확인된 필러는 최소 {summary.recognized_filler_count}회입니다."
+            f"Chrome STT 처리 중 명확히 확인된 필러는 최소 {summary.recognized_filler_count}회입니다."
         )
         actions.append(
             "필러가 나오려는 순간에는 소리를 채우지 말고 짧게 멈춘 뒤 첫 문장을 시작하세요."
@@ -242,3 +250,111 @@ def build_speech_report(
     """세션 음성 요약과 결정론적 코칭 동시 생성."""
     summary = build_speech_summary(transcript)
     return summary, build_speech_delivery_feedback(summary)
+
+def build_speech_prompt_context(
+    summary: Optional[SpeechSummary],
+) -> str:
+    """LLM에 전달할 검증된 음성 판정 신호 생성."""
+    if summary is None:
+        return ""
+
+    lines: List[str] = [
+        "[측정 범위]",
+        (
+            f"- 전체 {summary.total_answer_count}개 답변 중 "
+            f"{summary.measured_answer_count}개에서 음성 지표 수집"
+        ),
+    ]
+
+    if summary.reliable_answer_count < summary.measured_answer_count:
+        excluded_count = (
+            summary.measured_answer_count
+            - summary.reliable_answer_count
+        )
+        lines.append(
+            f"- 신뢰도 낮아 속도·멈춤 판정에서 제외된 답변: {excluded_count}개"
+        )
+
+    actionable_signal_count = 0
+
+    if (
+        summary.pace_status is not None
+        and summary.session_pace_wpm is not None
+    ):
+        pace_labels = {
+            "slow": "현재 분석 기준 느린 편",
+            "balanced": "현재 분석 범위 안",
+            "fast": "현재 분석 기준 빠른 편",
+        }
+        lines.extend(
+            [
+                "[말 빠르기]",
+                f"- 판정: {pace_labels[summary.pace_status]}",
+                (
+                    "- 근거: 신뢰 가능한 음성 답변 합산 "
+                    f"{summary.session_pace_wpm:.1f}어절/분"
+                ),
+            ]
+        )
+        actionable_signal_count += 1
+
+    if summary.long_pause_count > 0:
+        lines.extend(
+            [
+                "[발화 중 긴 멈춤]",
+                f"- 1.5초 이상 내부 멈춤: {summary.long_pause_count}회",
+                f"- 최장 멈춤: {_seconds(summary.longest_pause_ms)}",
+            ]
+        )
+        actionable_signal_count += 1
+
+    if (
+        summary.average_initial_latency_ms is not None
+        and summary.average_initial_latency_ms >= 2_000
+    ):
+        lines.extend(
+            [
+                "[답변 착수 지연]",
+                (
+                    "- 질문 뒤 첫 발화까지 평균: "
+                    f"{_seconds(summary.average_initial_latency_ms)}"
+                ),
+            ]
+        )
+        actionable_signal_count += 1
+
+    if summary.volume_variation_status == "low":
+        lines.extend(
+            [
+                "[상대 음량 변화]",
+                "- 판정: 측정 가능한 답변에서 변화 폭이 작은 편",
+                (
+                    "- 주의: 브라우저 자동 음량 보정의 영향을 받으므로 "
+                    "절대 음량이나 감정 상태로 해석 금지"
+                ),
+            ]
+        )
+        actionable_signal_count += 1
+
+    if summary.recognized_filler_count > 0:
+        lines.extend(
+            [
+                "[명확히 인식된 필러]",
+                (
+                    "- Chrome STT 처리 중 확인된 최소 횟수: "
+                    f"{summary.recognized_filler_count}회"
+                ),
+                "- 주의: 실제 전체 필러 횟수가 아닌 인식 하한선",
+            ]
+        )
+        actionable_signal_count += 1
+
+    if actionable_signal_count == 0:
+        lines.extend(
+            [
+                "[종합 판정]",
+                "- 현재 신뢰 가능한 측정에서 뚜렷한 개선 신호 미확인",
+            ]
+        )
+
+    return "\n".join(lines)

@@ -294,7 +294,7 @@ export function countSttWords(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0
 }
 
-/** final STT에서 강한 필러의 인식 하한선 계산. */
+/** STT 문자열에서 강한 필러의 인식 하한선 계산. */
 export function countRecognizedFillers(text: string): number {
   const matches = text.match(
     /(?:^|[\s,.!?…])(?:어+|음+|으+음+)(?=$|[\s,.!?…])/g,
@@ -320,6 +320,7 @@ export function buildSpeechMetrics(
   segments: CapturedSpeechSegment[],
   rawFinalSttText: string,
   finalAnswerText: string,
+  recognizedFillerMinimum = 0,
 ): SpeechMetrics | null {
   if (segments.length === 0) return null
 
@@ -430,8 +431,10 @@ export function buildSpeechMetrics(
             ).toFixed(1),
           )
         : null,
-    recognized_filler_count:
+    recognized_filler_count: Math.max(
       countRecognizedFillers(rawFinalSttText),
+      Math.max(0, Math.floor(recognizedFillerMinimum)),
+    ),
     filler_measurement: 'recognized_minimum',
     confidence,
     confidence_reasons: confidenceReasons,

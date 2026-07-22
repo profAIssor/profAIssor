@@ -24,15 +24,24 @@ interface ActiveSegment {
   frames: RmsFrame[]
 }
 
+interface LiveSilenceState {
+  noiseFloorRms: number
+  silenceStartedAtMs: number
+}
+
 interface UseMicMetricsResult {
   available: boolean
   recording: boolean
   error: string | null
+
+  /** 마이크 시작 또는 마지막 발화 이후 5초 이상 침묵 시 증가 신호. */
+  longSilenceSignal: number
   startUserSegment: () => Promise<boolean>
   stopUserSegment: () => void
   finalizeAnswer: (
     rawFinalSttText: string,
     finalAnswerText: string,
+    recognizedFillerMinimum: number,
   ) => SpeechMetrics | null
   resetAnswer: () => void
 }
@@ -56,17 +65,23 @@ export function useMicMetrics(): UseMicMetricsResult {
   )
   const [recording, setRecording] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [longSilenceSignal, setLongSilenceSignal] = useState(0)
 
   const streamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const sourceRef =
     useRef<MediaStreamAudioSourceNode | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const sampleBufferRef = useRef<Float32Array | null>(null)
+  const sampleBufferRef = useRef<Float32Array<ArrayBuffer> | null>(null)
   const intervalRef = useRef<number | null>(null)
   const activeSegmentRef = useRef<ActiveSegment | null>(null)
   const completedSegmentsRef =
     useRef<CapturedSpeechSegment[]>([])
+  const liveSilenceStateRef = useRef<LiveSilenceState>({
+    noiseFloorRms: 0.003,
+    silenceStartedAtMs: 0,
+  })
+  const longSilenceTipShownRef = useRef(false)
 
   /** RMS 수집 타이머 정리. */
   const clearSamplingInterval = useCallback(() => {
@@ -120,8 +135,12 @@ export function useMicMetrics(): UseMicMetricsResult {
         audioContextRef.current = audioContext
         sourceRef.current = source
         analyserRef.current = analyser
+        // Web Audio API가 요구하는 ArrayBuffer 기반 샘플 버퍼 생성
+        const sampleArrayBuffer = new ArrayBuffer(
+          analyser.fftSize * Float32Array.BYTES_PER_ELEMENT,
+        )
         sampleBufferRef.current = new Float32Array(
-          analyser.fftSize,
+          sampleArrayBuffer,
         )
         setError(null)
         return true
@@ -175,6 +194,10 @@ export function useMicMetrics(): UseMicMetricsResult {
         startedAtMs,
         frames: [],
       }
+      liveSilenceStateRef.current = {
+        noiseFloorRms: 0.003,
+        silenceStartedAtMs: startedAtMs,
+      }
       setRecording(true)
 
       intervalRef.current = window.setInterval(() => {
@@ -192,10 +215,37 @@ export function useMicMetrics(): UseMicMetricsResult {
         currentAnalyser.getFloatTimeDomainData(
           currentBuffer,
         )
+        const sampledAtMs = performance.now()
+        const rms = calculateRms(currentBuffer)
+
         activeSegment.frames.push({
-          elapsed_ms: performance.now() - startedAtMs,
-          rms: calculateRms(currentBuffer),
+          elapsed_ms: sampledAtMs - startedAtMs,
+          rms,
         })
+
+        const liveState = liveSilenceStateRef.current
+        const voiceThreshold = Math.max(
+          0.006,
+          liveState.noiseFloorRms * 1.8,
+        )
+        const isVoiceFrame = rms >= voiceThreshold
+
+        if (isVoiceFrame) {
+          // 마지막 발화 프레임 기준 침묵 시작 시각 갱신
+          liveState.silenceStartedAtMs = sampledAtMs
+        } else {
+          // 정적 환경 변화 반영을 위한 배경 소음 기준 완만한 보정
+          liveState.noiseFloorRms =
+            liveState.noiseFloorRms * 0.97 + rms * 0.03
+
+          if (
+            sampledAtMs - liveState.silenceStartedAtMs >= 5_000 &&
+            !longSilenceTipShownRef.current
+          ) {
+            longSilenceTipShownRef.current = true
+            setLongSilenceSignal((previous) => previous + 1)
+          }
+        }
       }, SPEECH_METRIC_CONFIG.frameIntervalMs)
 
       return true
@@ -225,6 +275,7 @@ export function useMicMetrics(): UseMicMetricsResult {
     (
       rawFinalSttText: string,
       finalAnswerText: string,
+      recognizedFillerMinimum: number,
     ): SpeechMetrics | null => {
       stopUserSegment()
 
@@ -232,8 +283,10 @@ export function useMicMetrics(): UseMicMetricsResult {
         completedSegmentsRef.current,
         rawFinalSttText,
         finalAnswerText,
+        recognizedFillerMinimum,
       )
       completedSegmentsRef.current = []
+      longSilenceTipShownRef.current = false
       return metrics
     },
     [stopUserSegment],
@@ -244,6 +297,7 @@ export function useMicMetrics(): UseMicMetricsResult {
     stopUserSegment()
     completedSegmentsRef.current = []
     activeSegmentRef.current = null
+    longSilenceTipShownRef.current = false
     setRecording(false)
   }, [stopUserSegment])
 
@@ -276,6 +330,7 @@ export function useMicMetrics(): UseMicMetricsResult {
     available,
     recording,
     error,
+    longSilenceSignal,
     startUserSegment,
     stopUserSegment,
     finalizeAnswer,

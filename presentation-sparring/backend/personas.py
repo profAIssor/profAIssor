@@ -1,31 +1,20 @@
-"""발표 질의응답에서 사용할 청중 persona 정의.
-
-Persona는 다음 두 가지를 결정합니다.
-
-1. 어떤 관점과 태도로 질문할지
-2. 네 가지 공통 질문 유형을 어떤 순서로 우선할지
-
-자료 전체 흐름과 난이도별 질문 깊이는 prompts.py에서 결정합니다.
-LLM provider나 모델 선택에는 관여하지 않습니다.
-"""
+"""발표 질의응답에서 사용할 평가자 페르소나와 질문 유형 정책."""
 
 from typing import Dict, Optional, Tuple
 
 
-# 모든 persona가 같은 질문 유형을 사용할 수 있지만,
-# 앞쪽 유형일수록 해당 persona가 먼저 검토합니다.
 QuestionTypePriority = Tuple[str, ...]
+QuestionTypePolicy = Dict[str, QuestionTypePriority]
 
 
 PERSONAS: Dict[str, dict] = {
     "standard": {
         "name": "기본 발표 평가자",
-        "question_type_priority": (
-            "definition",
-            "evidence",
-            "application",
-            "counterexample",
-        ),
+        "question_type_policy": {
+            "primary": ("definition", "evidence"),
+            "secondary": ("application",),
+            "limited": ("counterexample",),
+        },
         "system": (
             "당신은 발표 질의응답을 처음 연습하는 학생을 돕는 "
             "중립적인 발표 평가자입니다. "
@@ -46,12 +35,11 @@ PERSONAS: Dict[str, dict] = {
     },
     "professor": {
         "name": "까다로운 교수",
-        "question_type_priority": (
-            "evidence",
-            "definition",
-            "counterexample",
-            "application",
-        ),
+        "question_type_policy": {
+            "primary": ("evidence", "definition"),
+            "secondary": ("counterexample",),
+            "limited": ("application",),
+        },
         "system": (
             "당신은 전공 발표를 심사하는 까다로운 교수입니다. "
             "발표자가 슬라이드 문장을 암기한 수준이 아니라 자료 전체의 논리와 "
@@ -60,7 +48,7 @@ PERSONAS: Dict[str, dict] = {
             "개념 설명·교재형 자료에서는 정의, 개념 간 구분, 사용 조건과 예시의 연결을 보세요. "
             "근거 요구형과 정의 확인형을 우선하고, 보통 이상 난이도에서는 "
             "반례 제시형으로 주장 범위와 성립 조건을 검증할 수 있습니다. "
-            "확장 적용형은 자료의 핵심 논리와 직접 연결될 때 사용하세요. "
+            "확장 적용형은 자료의 핵심 논리와 직접 연결될 때만 사용하세요. "
             "한 슬라이드의 문장만 떼어 묻지 말고, 관련된 앞뒤 슬라이드가 있다면 "
             "그 관계를 먼저 이해한 뒤 가장 중요한 한 지점만 질문하세요. "
             "자료에 없는 사실을 전제로 삼지 말고, 질문은 날카롭되 존댓말 한 문장으로 작성하세요."
@@ -68,12 +56,11 @@ PERSONAS: Dict[str, dict] = {
     },
     "peer": {
         "name": "디테일 파는 동료",
-        "question_type_priority": (
-            "counterexample",
-            "application",
-            "evidence",
-            "definition",
-        ),
+        "question_type_policy": {
+            "primary": ("counterexample", "application"),
+            "secondary": ("evidence",),
+            "limited": ("definition",),
+        },
         "system": (
             "당신은 발표자와 유사한 수준의 배경지식을 가진 예리한 동료입니다. "
             "자료 전체의 흐름을 먼저 읽고, 앞에서 제시한 조건이 뒤의 결론이나 예시에 "
@@ -89,12 +76,11 @@ PERSONAS: Dict[str, dict] = {
     },
     "layperson": {
         "name": "배경지식 없는 청중",
-        "question_type_priority": (
-            "definition",
-            "application",
-            "evidence",
-            "counterexample",
-        ),
+        "question_type_policy": {
+            "primary": ("definition", "application"),
+            "secondary": ("evidence",),
+            "limited": ("counterexample",),
+        },
         "system": (
             "당신은 이 분야에 배경지식이 없는 일반 청중입니다. "
             "전체 자료가 무엇을 설명하려는지 먼저 파악한 뒤, 전문 용어의 쉬운 의미, "
@@ -113,8 +99,6 @@ PERSONAS: Dict[str, dict] = {
 DEFAULT_PERSONA = "standard"
 
 
-# 전공 계열은 별도의 질문 유형이 아니라,
-# 선택된 질문 유형에서 어떤 내용을 중요하게 볼지 보조합니다.
 FIELD_HINTS: Dict[str, str] = {
     "engineering": (
         "공학 발표에서 확인할 수 있는 관점은 구현 조건, 입력과 출력의 흐름, "
@@ -137,34 +121,109 @@ FIELD_HINTS: Dict[str, str] = {
 
 
 def get_persona(persona_id: str) -> dict:
-    """존재하지 않는 persona ID는 기본 발표 평가자로 대체합니다."""
+    """존재하지 않는 ID의 기본 평가자 대체."""
     return PERSONAS.get(persona_id, PERSONAS[DEFAULT_PERSONA])
 
 
-def get_question_type_priority(persona_id: str) -> QuestionTypePriority:
-    """persona별 질문 유형 우선순위를 반환합니다."""
+def get_question_type_policy(persona_id: str) -> QuestionTypePolicy:
+    """페르소나별 주요·보조·제한 질문 유형 반환."""
     persona = get_persona(persona_id)
-    priority = persona.get("question_type_priority")
+    policy = persona.get("question_type_policy")
+    if isinstance(policy, dict):
+        return {
+            "primary": tuple(policy.get("primary", ())),
+            "secondary": tuple(policy.get("secondary", ())),
+            "limited": tuple(policy.get("limited", ())),
+        }
 
-    if isinstance(priority, tuple) and priority:
-        return priority
+    return get_question_type_policy(DEFAULT_PERSONA)
 
-    return PERSONAS[DEFAULT_PERSONA]["question_type_priority"]
+
+def get_question_type_priority(persona_id: str) -> QuestionTypePriority:
+    """기존 호출부 호환용 전체 질문 유형 우선순위 반환."""
+    policy = get_question_type_policy(persona_id)
+    return (
+        *policy["primary"],
+        *policy["secondary"],
+        *policy["limited"],
+    )
+
+
+def get_allowed_question_types(
+    persona_id: str,
+    difficulty: str,
+) -> QuestionTypePriority:
+    """난이도별 사용 가능한 질문 유형 반환."""
+    policy = get_question_type_policy(persona_id)
+
+    if difficulty == "hard":
+        return (
+            *policy["primary"],
+            *policy["secondary"],
+            *policy["limited"],
+        )
+
+    return (
+        *policy["primary"],
+        *policy["secondary"],
+    )
+
+
+def get_question_policy_prompt(
+    persona_id: str,
+    difficulty: str,
+) -> str:
+    """페르소나 유형군과 난이도 이동 정책의 프롬프트 변환."""
+    policy = get_question_type_policy(persona_id)
+    primary = ", ".join(policy["primary"])
+    secondary = ", ".join(policy["secondary"])
+    limited = ", ".join(policy["limited"])
+
+    if difficulty == "easy":
+        difficulty_rule = (
+            "주요 질문 유형을 우선하고 보조 질문 유형은 이전 질문과의 반복을 "
+            "피할 때만 사용하세요. 제한 질문 유형은 사용하지 마세요. "
+            "이전 질문이 있다면 같은 용어를 다른 말로 되묻지 말고, 자료 전체에서 "
+            "다른 핵심 개념·다른 절차 단계·다른 비교 지점을 선택하세요. "
+            "질문 하나는 자료에 직접 적힌 정보만으로 1~2문장 안에 답할 수 있어야 합니다."
+        )
+    elif difficulty == "hard":
+        difficulty_rule = (
+            "주요·보조 질문 유형을 우선하되, 제한 질문 유형도 자료 전체의 논리를 "
+            "깊게 검증하는 데 꼭 필요한 경우 사용할 수 있습니다. "
+            "한 슬라이드의 세부 문구에 머무르지 말고 서로 다른 2~3개 슬라이드의 "
+            "전제와 결과, 조건과 적용, 주장과 한계를 연결하세요. "
+            "외부 최신 사실을 사실처럼 추가하지 말고, 자료에 없는 확장은 반드시 "
+            "가정형 조건으로 표현하세요."
+        )
+    else:
+        difficulty_rule = (
+            "주요 질문 유형을 우선하고, 같은 유형이나 같은 핵심 개념이 반복될 때 "
+            "보조 질문 유형으로 전환하세요. 제한 질문 유형은 사용하지 마세요. "
+            "관련 슬라이드 1~3개를 연결하되 추론은 한 단계로 제한하세요."
+        )
+
+    return (
+        "\n\n[페르소나 질문 유형 정책]\n"
+        f"- 주요 질문 유형: {primary}\n"
+        f"- 보조 질문 유형: {secondary}\n"
+        f"- 제한 질문 유형: {limited}\n"
+        f"{difficulty_rule}"
+    )
 
 
 def get_model_hint(persona_id: str) -> Optional[str]:
-    """기존 main.py 호출부와의 호환성을 위해 항상 None을 반환합니다."""
+    """기존 모델 선택 호출부 호환용 빈 힌트 반환."""
     _ = persona_id
     return None
 
 
 def get_field_hint(field: Optional[str]) -> str:
-    """전공별 검증 관점을 질문 생성 프롬프트에 추가합니다."""
+    """전공별 검증 관점의 프롬프트 추가."""
     if not field:
         return ""
 
     hint = FIELD_HINTS.get(field)
-
     if not hint:
         return ""
 

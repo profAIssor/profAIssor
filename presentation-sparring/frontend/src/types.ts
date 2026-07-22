@@ -100,7 +100,7 @@ export interface SpeechMetrics {
   /** 발화 프레임 안에서의 상대 음량 변화 폭. */
   volume_variation_db: number | null
 
-  /** final STT에서 명확히 남은 강한 필러 최소 횟수. */
+  /** Chrome STT 처리 중 final 또는 interim에서 명확히 확인된 강한 필러 최소 횟수. */
   recognized_filler_count: number
 
   /** 필러 수치가 실제 총횟수가 아닌 인식 하한선임을 나타내는 구분. */
@@ -129,6 +129,18 @@ export interface TranscriptTurn {
 
   /** 음성 답변에서만 존재하는 선택 지표. */
   speech_metrics?: SpeechMetrics
+
+  /** 최초 무응답 뒤 제공한 쉬운 재질문. */
+  retry_question?: string | null
+
+  /** 쉬운 재질문에 대한 답변. */
+  retry_answer?: string | null
+
+  /** 쉬운 재질문 답변의 음성 지표. */
+  retry_speech_metrics?: SpeechMetrics
+
+  /** 재질문에도 답하지 못했을 때 제공한 개념 설명. */
+  final_explanation?: string | null
 }
 
 export interface SpeechSummary {
@@ -173,6 +185,12 @@ export interface Revision {
   example: string
 }
 
+
+export interface AnswerCoaching {
+  turn_index: number
+  reference_answer: string | null
+}
+
 export interface Report {
   content_feedback: string
   delivery_feedback: string
@@ -184,18 +202,30 @@ export interface Report {
   speech_summary?: SpeechSummary | null
   speech_delivery_feedback?: string
   revisions?: Revision[]
+  answer_coaching?: AnswerCoaching[]
   answer_structure_tip?: string
+
+  /** 발표 대본 제공 여부. */
+  script_available?: boolean
+
+  /** 슬라이드 제공 여부. */
+  slides_available?: boolean
+
+  /** 대본과 슬라이드가 모두 있어 커버리지 계산이 가능한지 여부. */
+  slide_coverage_available?: boolean
 }
 
 export type Stage = 'setup' | 'spar' | 'report' | 'history'
 
 export interface ChatMessage {
-  role: 'question' | 'answer' | 'verdict'
+  role: 'question' | 'answer' | 'verdict' | 'tip'
   personaId: PersonaId
   text: string
   questionType?: QuestionType
   rubric?: Record<string, string>
   answerStatus?: AnswerStatus
   supplement?: string | null
+  supplementTitle?: string
+  learningNote?: string
   relatedSlides?: number[]
 }
