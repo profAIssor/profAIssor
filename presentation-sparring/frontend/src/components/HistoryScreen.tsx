@@ -1,7 +1,8 @@
-import { RotateCcw } from 'lucide-react'
+import { RotateCcw, Trash2, X } from 'lucide-react'
+import { useState } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { coverageRate } from '../lib/coverage'
-import type { SessionRecord } from '../lib/sessionStore'
+import { clearSessions, deleteSession, type SessionRecord } from '../lib/sessionStore'
 import { formatMinutes } from '../lib/timing'
 
 interface Props {
@@ -15,7 +16,22 @@ function shortDate(iso: string): string {
 }
 
 /** Session history: a chronological trend chart (2+ sessions) + a full list. */
-export default function HistoryScreen({ sessions, onRestart }: Props) {
+export default function HistoryScreen({ sessions: initialSessions, onRestart }: Props) {
+  // Own the list locally so deletions re-render immediately; storage stays in
+  // sync via deleteSession/clearSessions. Re-entering the screen reloads fresh.
+  const [sessions, setSessions] = useState<SessionRecord[]>(initialSessions)
+
+  const handleDelete = (id: string) => {
+    deleteSession(id)
+    setSessions((prev) => prev.filter((s) => s.id !== id))
+  }
+
+  const handleClearAll = () => {
+    if (!window.confirm('모든 히스토리 기록을 삭제할까요? 되돌릴 수 없습니다.')) return
+    clearSessions()
+    setSessions([])
+  }
+
   // Stored newest-first; the chart reads left-to-right chronologically.
   const chartData = [...sessions].reverse().map((s) => ({
     label: shortDate(s.completedAt),
@@ -27,7 +43,19 @@ export default function HistoryScreen({ sessions, onRestart }: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
-      <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">히스토리</h1>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">히스토리</h1>
+        {sessions.length > 0 && (
+          <button
+            type="button"
+            onClick={handleClearAll}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 shadow-sm transition hover:border-rose-300 hover:text-rose-600"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            전체 삭제
+          </button>
+        )}
+      </div>
 
       {sessions.length === 0 ? (
         <p className="text-sm text-slate-500">아직 완료된 세션이 없습니다.</p>
@@ -57,12 +85,25 @@ export default function HistoryScreen({ sessions, onRestart }: Props) {
 
           <ul className="space-y-2">
             {sessions.map((s) => (
-              <li key={s.id} className="rounded-xl border border-slate-200/80 bg-white p-4 text-sm shadow-sm">
-                <div className="font-semibold text-slate-800">{shortDate(s.completedAt)}</div>
-                <div className="mt-1 text-xs text-slate-500">
-                  전공계열: {s.field ?? '미지정'} · 어절 수: {s.report.word_count} · 필러: {s.report.filler_count}회 ·
-                  예상 발표 시간: {formatMinutes(s.estMinutes)} · 커버리지: {coverageRate(s.report.slide_coverage)}%
+              <li
+                key={s.id}
+                className="flex items-start justify-between gap-3 rounded-xl border border-slate-200/80 bg-white p-4 text-sm shadow-sm"
+              >
+                <div className="min-w-0">
+                  <div className="font-semibold text-slate-800">{shortDate(s.completedAt)}</div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    전공계열: {s.field ?? '미지정'} · 어절 수: {s.report.word_count} · 필러: {s.report.filler_count}회 ·
+                    예상 발표 시간: {formatMinutes(s.estMinutes)} · 커버리지: {coverageRate(s.report.slide_coverage)}%
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => handleDelete(s.id)}
+                  aria-label="이 기록 삭제"
+                  className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-400 transition hover:border-rose-400 hover:text-rose-500"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </li>
             ))}
           </ul>

@@ -48,6 +48,11 @@ export function loadSessions(): SessionRecord[] {
   return readAll()
 }
 
+/** Remove a single session by id; no-op if it isn't found. */
+export function deleteSession(id: string): void {
+  writeAll(readAll().filter((session) => session.id !== id))
+}
+
 export function clearSessions(): void {
   try {
     localStorage.removeItem(STORAGE_KEY)
