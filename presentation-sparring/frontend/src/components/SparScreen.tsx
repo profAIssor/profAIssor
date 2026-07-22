@@ -333,7 +333,13 @@ export default function SparScreen({
   }
 
   const onKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    // Enter 전송, Shift+Enter 줄바꿈. 한글 IME 조합 중 Enter(글자 확정)는
+    // isComposing으로 걸러 오전송을 막는다.
+    if (
+      event.key === 'Enter' &&
+      !event.shiftKey &&
+      !(event.nativeEvent as { isComposing?: boolean }).isComposing
+    ) {
       event.preventDefault()
       void submit()
     }
@@ -574,8 +580,8 @@ export default function SparScreen({
             rows={2}
             placeholder={
               sttSupported
-                ? '답변을 입력하거나 마이크로 말하세요. (Ctrl/⌘ + Enter 전송)'
-                : '답변을 입력하세요. (Ctrl/⌘ + Enter 전송)'
+                ? '답변을 입력하거나 마이크로 말하세요. (Enter 전송, Shift+Enter 줄바꿈)'
+                : '답변을 입력하세요. (Enter 전송, Shift+Enter 줄바꿈)'
             }
             className="min-h-12 min-w-0 flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-base leading-relaxed text-slate-700 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 sm:px-4"
           />

@@ -1,18 +1,22 @@
-import { FileText, Settings2, Sparkles, Users } from 'lucide-react'
+import { Clock, FileText, Settings2, Sparkles, Users } from 'lucide-react'
 import { useState } from 'react'
 import { PERSONAS } from '../personas'
+import { estimatePresentationMinutes, formatMinutes } from '../lib/timing'
 import type { AcademicField, Difficulty, PersonaId, Slide } from '../types'
 import SlideInput from './SlideInput'
 
+interface SetupData {
+  script: string
+  slides: Slide[]
+  personaIds: PersonaId[]
+  difficulty: Difficulty
+  maxTurns: number
+  field: AcademicField | null
+}
+
 interface Props {
-  onStart: (data: {
-    script: string
-    slides: Slide[]
-    personaIds: PersonaId[]
-    difficulty: Difficulty
-    maxTurns: number
-    field: AcademicField | null
-  }) => void
+  onStart: (data: SetupData) => void
+  onSkipToReport: (data: SetupData) => void
 }
 
 const DIFFICULTY_OPTIONS: { id: Difficulty; label: string }[] = [
@@ -38,7 +42,7 @@ const SAMPLE_SLIDES: Slide[] = [
   { index: 3, text: '실험 결과: GLUE 벤치마크에서 2.3배 속도 향상, 정확도 유지' },
 ]
 
-export default function SetupScreen({ onStart }: Props) {
+export default function SetupScreen({ onStart, onSkipToReport }: Props) {
   const [script, setScript] = useState('')
   const [slides, setSlides] = useState<Slide[]>([])
 
@@ -74,6 +78,19 @@ export default function SetupScreen({ onStart }: Props) {
 
   // 기본 질문 1회를 포함한 평가자별 전체 질문 수 계산
   const totalQuestionCount = maxTurns + 1
+
+  // 대본 어절 수(없으면 슬라이드 수) 기반 발표 예상 시간
+  const estMinutes = estimatePresentationMinutes(script, slides)
+  const estBasis = script.trim().length > 0 ? '대본 약 120어절/분 기준' : '슬라이드 수 기준 추정'
+
+  const buildData = (): SetupData => ({
+    script,
+    slides: slides.filter((s) => s.text.trim()),
+    personaIds: selected,
+    difficulty,
+    maxTurns,
+    field,
+  })
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -264,29 +281,44 @@ export default function SetupScreen({ onStart }: Props) {
             </div>
           </div>
 
+          {/* 발표 예상 시간 (대본/슬라이드 입력에 따라 실시간 갱신) */}
+          {hasContent && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm">
+              <span className="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                <Clock className="h-4 w-4 text-indigo-500" />
+                발표 예상 시간
+              </span>
+              <span className="text-right">
+                <span className="text-base font-bold text-slate-800">{formatMinutes(estMinutes)}</span>
+                <span className="ml-2 text-[11px] text-slate-400">{estBasis}</span>
+              </span>
+            </div>
+          )}
+
           <button
             type="button"
             disabled={!canStart}
-            onClick={() =>
-              onStart({
-                script,
-                slides: slides.filter((s) => s.text.trim()),
-                personaIds: selected,
-                difficulty,
-                maxTurns,
-                field,
-              })
-            }
+            onClick={() => onStart(buildData())}
             className="w-full rounded-xl bg-indigo-600 py-4 text-lg font-semibold text-white shadow-lg shadow-indigo-600/10 transition-all hover:scale-[1.01] hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100"
           >
             스파링 시작 →
+          </button>
+
+          {/* 질의응답 없이 대본/슬라이드만으로 바로 리포트 확인 */}
+          <button
+            type="button"
+            disabled={!hasContent}
+            onClick={() => onSkipToReport(buildData())}
+            className="w-full rounded-xl border-2 border-slate-200 py-3 text-sm font-semibold text-slate-600 transition-all hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            질문 없이 결과만 보기
           </button>
 
           {!canStart && (
             <p className="text-center text-xs text-slate-400">
               {!hasContent
                 ? '발표 대본 또는 슬라이드 중 하나는 입력해야 시작할 수 있어요'
-                : '청중 페르소나를 1개 이상 선택해주세요'}
+                : '스파링을 시작하려면 청중 페르소나를 1개 이상 선택하세요 (결과만 보기는 선택 없이 가능)'}
             </p>
           )}
         </div>

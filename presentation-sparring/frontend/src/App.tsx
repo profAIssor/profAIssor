@@ -70,6 +70,43 @@ export default function App() {
     }
   }
 
+  // 질의응답을 건너뛰고 대본/슬라이드만으로 바로 리포트를 생성한다.
+  // fetchReport는 transcript가 비어도 동작하며, ReportScreen도 빈 기록을 처리한다.
+  // setState는 비동기라 리포트 요청에는 전달받은 data 값을 직접 사용한다.
+  const handleSkipToReport = async (data: {
+    script: string
+    slides: Slide[]
+    personaIds: PersonaId[]
+    difficulty: Difficulty
+    maxTurns: number
+    field: AcademicField | null
+  }) => {
+    setScript(data.script)
+    setSlides(data.slides)
+    setPersonaIds(data.personaIds)
+    setDifficulty(data.difficulty)
+    setMaxTurns(data.maxTurns)
+    setField(data.field)
+    setTranscript([])
+    setLoadingReport(true)
+    setReportError(null)
+    setStage('report')
+    try {
+      const r = await fetchReport(data.script, data.slides, [], data.field)
+      setReport(r)
+      saveSession({
+        field: data.field,
+        personaIds: data.personaIds,
+        report: r,
+        estMinutes: r.word_count > 0 ? r.word_count / 120 : 0,
+      })
+    } catch (e) {
+      setReportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoadingReport(false)
+    }
+  }
+
   const handleRestart = () => {
     setStage('setup')
     setReport(null)
@@ -142,7 +179,9 @@ export default function App() {
 
       {/* Main content */}
       <main className="flex-1 px-4 py-8 sm:px-8 sm:py-10">
-        {stage === 'setup' && <SetupScreen onStart={handleStart} />}
+        {stage === 'setup' && (
+          <SetupScreen onStart={handleStart} onSkipToReport={handleSkipToReport} />
+        )}
 
         {stage === 'spar' && (
           <SparScreen
