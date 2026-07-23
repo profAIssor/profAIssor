@@ -1,4 +1,5 @@
 import {
+  Clock,
   FileText,
   Settings2,
   Sparkles,
@@ -12,6 +13,10 @@ import {
 import type { ChangeEvent } from 'react'
 import { fetchPersonas } from '../api'
 import {
+  estimatePresentationMinutes,
+  formatMinutes,
+} from '../lib/timing'
+import {
   getCachedPersonas,
   replacePersonaCache,
 } from '../personas'
@@ -24,15 +29,18 @@ import type {
 } from '../types'
 import SlideInput from './SlideInput'
 
+interface SetupData {
+  script: string
+  slides: Slide[]
+  personaIds: PersonaId[]
+  difficulty: Difficulty
+  maxTurns: number
+  field: AcademicField | null
+}
+
 interface Props {
-  onStart: (data: {
-    script: string
-    slides: Slide[]
-    personaIds: PersonaId[]
-    difficulty: Difficulty
-    maxTurns: number
-    field: AcademicField | null
-  }) => void
+  onStart: (data: SetupData) => void
+  onSkipToReport: (data: SetupData) => void
 }
 
 const DIFFICULTY_OPTIONS: {
@@ -75,7 +83,10 @@ const SAMPLE_SLIDES: Slide[] = [
 ]
 
 /** 발표 자료 등록과 질의응답 조건 설정 화면. */
-export default function SetupScreen({ onStart }: Props) {
+export default function SetupScreen({
+  onStart,
+  onSkipToReport,
+}: Props) {
   const cachedPersonas = getCachedPersonas()
 
   const [script, setScript] = useState('')
@@ -153,6 +164,26 @@ export default function SetupScreen({ onStart }: Props) {
     personas.length > 0
   const totalQuestionCount = maxTurns + 1
 
+  // 대본 어절 수 또는 슬라이드 수 기반 발표 예상 시간 계산
+  const estimatedMinutes =
+    estimatePresentationMinutes(script, slides)
+  const estimateBasis =
+    script.trim().length > 0
+      ? '대본 약 120어절/분 기준'
+      : '슬라이드 수 기준 추정'
+
+  /** 현재 설정값의 공통 요청 데이터 생성. */
+  const buildData = (): SetupData => ({
+    script: script.trim(),
+    slides: slides.filter(
+      (slide) => slide.text.trim(),
+    ),
+    personaIds: selected,
+    difficulty,
+    maxTurns,
+    field,
+  })
+
   const fillSample = () => {
     if (
       hasContent &&
@@ -168,17 +199,7 @@ export default function SetupScreen({ onStart }: Props) {
 
   const startSparring = () => {
     if (!canStart) return
-
-    onStart({
-      script: script.trim(),
-      slides: slides.filter(
-        (slide) => slide.text.trim(),
-      ),
-      personaIds: selected,
-      difficulty,
-      maxTurns,
-      field,
-    })
+    onStart(buildData())
   }
 
   return (
@@ -448,6 +469,23 @@ export default function SetupScreen({ onStart }: Props) {
             </div>
           </section>
 
+          {hasContent && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm">
+              <span className="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                <Clock className="h-4 w-4 text-indigo-500" />
+                발표 예상 시간
+              </span>
+              <span className="text-right">
+                <span className="text-base font-bold text-slate-800">
+                  {formatMinutes(estimatedMinutes)}
+                </span>
+                <span className="ml-2 text-[11px] text-slate-400">
+                  {estimateBasis}
+                </span>
+              </span>
+            </div>
+          )}
+
           <button
             type="button"
             disabled={!canStart}
@@ -457,13 +495,22 @@ export default function SetupScreen({ onStart }: Props) {
             질의응답 스파링 시작 →
           </button>
 
+          <button
+            type="button"
+            disabled={!hasContent}
+            onClick={() => onSkipToReport(buildData())}
+            className="w-full rounded-xl border-2 border-slate-200 py-3 text-sm font-semibold text-slate-600 transition-all hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            질문 없이 결과만 보기
+          </button>
+
           {!canStart && (
             <p className="text-center text-xs text-slate-400">
               {!hasContent
                 ? '발표 대본 또는 슬라이드 중 하나는 입력해야 합니다.'
                 : personas.length === 0
-                  ? '평가자 목록을 먼저 불러와야 합니다.'
-                  : '청중 페르소나를 1개 이상 선택해주세요.'}
+                  ? '평가자 목록을 먼저 불러와야 합니다. 결과만 보기는 사용할 수 있습니다.'
+                  : '청중 페르소나를 1개 이상 선택해주세요. 결과만 보기는 선택 없이 사용할 수 있습니다.'}
             </p>
           )}
         </aside>
