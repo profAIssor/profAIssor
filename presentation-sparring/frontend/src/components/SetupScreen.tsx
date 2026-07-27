@@ -40,7 +40,6 @@ interface SetupData {
 
 interface Props {
   onStart: (data: SetupData) => void
-  onSkipToReport: (data: SetupData) => void
 }
 
 const DIFFICULTY_OPTIONS: {
@@ -85,7 +84,6 @@ const SAMPLE_SLIDES: Slide[] = [
 /** 발표 자료 등록과 질의응답 조건 설정 화면. */
 export default function SetupScreen({
   onStart,
-  onSkipToReport,
 }: Props) {
   const cachedPersonas = getCachedPersonas()
 
@@ -495,22 +493,13 @@ export default function SetupScreen({
             질의응답 스파링 시작 →
           </button>
 
-          <button
-            type="button"
-            disabled={!hasContent}
-            onClick={() => onSkipToReport(buildData())}
-            className="w-full rounded-xl border-2 border-slate-200 py-3 text-sm font-semibold text-slate-600 transition-all hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            질문 없이 결과만 보기
-          </button>
-
           {!canStart && (
             <p className="text-center text-xs text-slate-400">
               {!hasContent
                 ? '발표 대본 또는 슬라이드 중 하나는 입력해야 합니다.'
                 : personas.length === 0
-                  ? '평가자 목록을 먼저 불러와야 합니다. 결과만 보기는 사용할 수 있습니다.'
-                  : '청중 페르소나를 1개 이상 선택해주세요. 결과만 보기는 선택 없이 사용할 수 있습니다.'}
+                  ? '평가자 목록을 먼저 불러와야 합니다.'
+                  : '청중 페르소나를 1개 이상 선택해주세요.'}
             </p>
           )}
         </aside>
