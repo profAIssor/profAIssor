@@ -1,7 +1,7 @@
 import type { Slide } from '../types'
 
 // Speaking-rate assumption shared with ReportScreen's estimate (~120 어절/분).
-const WORDS_PER_MINUTE = 120
+export const WORDS_PER_MINUTE = 120
 // Rough fallback when there's no script to count — a slide-only deck is
 // estimated at ~1 minute of narration per slide.
 const MINUTES_PER_SLIDE = 1

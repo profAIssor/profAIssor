@@ -18,7 +18,6 @@ from personas import (
     get_model_hint,
     get_persona,
     get_question_policy_prompt,
-    get_question_type_priority,
 )
 from schemas import (
     QuestionRequest,
@@ -291,6 +290,9 @@ _QUESTION_STOPWORDS = {
     "발표",
 }
 
+# 난이도는 질문의 깊이를 정하는 값이며, 이미 물은 질문을 다시 묻지 않는 기준과는 분리한다.
+_QUESTION_DUPLICATE_THRESHOLD = 0.66
+
 
 def _normalize_question_text(question: str) -> str:
     """질문 중복 비교용 문자열 정규화."""
@@ -380,14 +382,7 @@ def _generate_question_data(
     # 프롬프트에는 탈락 초안도 보여 주되, 실제 중복 판정은
     # 사용자가 이미 받은 질문과만 비교하여 과도한 연쇄 탈락 방지
     prompt_blocked_questions = list(historical_questions)
-    candidates: List[tuple[float, dict]] = []
     rejected_target_slides: set[int] = set()
-
-    duplicate_threshold = {
-        "easy": 0.62,
-        "medium": 0.68,
-        "hard": 0.74,
-    }.get(req.difficulty, 0.68)
 
     for attempt in range(4):
         system, user = prompts.build_question_prompt(
@@ -428,15 +423,6 @@ def _generate_question_data(
             logger.exception(
                 "LLM call failed in /api/questions"
             )
-            # 이전 시도에서 유효한 후보가 있으면 네트워크 오류 때문에
-            # 전체 질문 흐름을 중단하지 않고 가장 덜 유사한 후보 사용
-            if candidates:
-                candidates.sort(key=lambda item: item[0])
-                logger.warning(
-                    "Question generation call failed; least similar candidate used: similarity=%.3f",
-                    candidates[0][0],
-                )
-                return candidates[0][1]
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -453,8 +439,6 @@ def _generate_question_data(
             candidate,
             historical_questions,
         )
-        candidates.append((similarity, data))
-
         target_slide = data.get("targets_slide")
         if (
             isinstance(target_slide, str)
@@ -464,36 +448,11 @@ def _generate_question_data(
         if isinstance(target_slide, int):
             rejected_target_slides.add(target_slide)
 
-        if similarity < duplicate_threshold:
+        if similarity < _QUESTION_DUPLICATE_THRESHOLD:
             return data
 
         # 다음 재생성 프롬프트에만 탈락 초안 추가
         prompt_blocked_questions.append(candidate)
-
-    if candidates:
-        candidates.sort(key=lambda item: item[0])
-        best_similarity, best_data = candidates[0]
-        best_question = str(
-            best_data.get("question", "")
-        ).strip()
-
-        # 완전 동일 질문만 아니면 502 대신 가장 덜 유사한 후보로 계속 진행
-        if (
-            best_question
-            and best_similarity < 0.96
-            and not any(
-                _normalize_question_text(best_question)
-                == _normalize_question_text(previous)
-                for previous in historical_questions
-            )
-        ):
-            logger.warning(
-                "Strict duplicate threshold not met; least similar candidate used: difficulty=%s similarity=%.3f question=%s",
-                req.difficulty,
-                best_similarity,
-                best_question[:160],
-            )
-            return best_data
 
     raise HTTPException(
         status_code=502,
@@ -515,7 +474,12 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
         )
         + SOURCE_TERM_PRESERVATION
     )
-    question_type_priority = list(get_question_type_priority(req.persona_id))
+    question_type_priority = list(
+        get_allowed_question_types(
+            req.persona_id,
+            req.difficulty,
+        )
+    )
     data = _generate_question_data(
         req,
         persona_system=persona_system,

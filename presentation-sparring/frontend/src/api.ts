@@ -23,15 +23,19 @@ const PERSONA_REQUEST_TIMEOUT_MS = 15_000
 const SLIDE_EXTRACTION_TIMEOUT_MS = 60_000
 
 // 백엔드의 LLM 호출 제한(60초)에 후처리 여유를 더한 단일 호출 예산.
-// 질문은 중복 회피로 최대 4회, 평가와 리포트는 보완 생성으로
-// 최대 2회의 순차 LLM 호출이 가능하므로 엔드포인트별로 다르게 기다린다.
+// 질문은 중복 회피로 최대 4회, 평가는 최대 2회, 리포트는
+// 참고 답변·음성 코칭 보완을 포함해 최대 3회의 순차 호출이 가능하다.
+// 아래 호출 횟수는 백엔드 재생성 정책을 바꿀 때 함께 조정해야 합니다.
 const LLM_CALL_BUDGET_MS = 75_000
+const MAX_QUESTION_LLM_CALLS = 4
+const MAX_EVALUATE_LLM_CALLS = 2
+const MAX_REPORT_LLM_CALLS = 3
 const QUESTION_REQUEST_TIMEOUT_MS =
-  LLM_CALL_BUDGET_MS * 4
+  LLM_CALL_BUDGET_MS * MAX_QUESTION_LLM_CALLS
 const EVALUATE_REQUEST_TIMEOUT_MS =
-  LLM_CALL_BUDGET_MS * 2
+  LLM_CALL_BUDGET_MS * MAX_EVALUATE_LLM_CALLS
 const REPORT_REQUEST_TIMEOUT_MS =
-  LLM_CALL_BUDGET_MS * 2
+  LLM_CALL_BUDGET_MS * MAX_REPORT_LLM_CALLS
 const RETRY_DELAY_MS = 600
 const RETRYABLE_STATUS_CODES = new Set([
   429,

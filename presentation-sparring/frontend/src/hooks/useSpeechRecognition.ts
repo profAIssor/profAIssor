@@ -325,6 +325,9 @@ export function useSpeechRecognition({
     pending.resolve(answerTranscriptRef.current.trim())
   }, [])
 
+  // contextPhrases는 인식 인스턴스를 만들 때만 적용할 수 있습니다.
+  // 호출부는 한 답변을 녹음하는 동안 동일한 배열을 유지하고,
+  // 질문 전환 뒤 녹음이 멈춘 상태에서만 새 배열을 전달해야 합니다.
   useEffect(() => {
     const Constructor = getConstructor()
     if (!Constructor) return

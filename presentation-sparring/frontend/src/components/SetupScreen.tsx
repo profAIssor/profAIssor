@@ -45,10 +45,23 @@ interface Props {
 const DIFFICULTY_OPTIONS: {
   id: Difficulty
   label: string
+  description: string
 }[] = [
-  { id: 'easy', label: '쉬움' },
-  { id: 'medium', label: '보통' },
-  { id: 'hard', label: '어려움' },
+  {
+    id: 'easy',
+    label: '쉬움',
+    description: '핵심 개념과 흐름 이해 확인',
+  },
+  {
+    id: 'medium',
+    label: '보통',
+    description: '주장·근거와 개념 연결 검증',
+  },
+  {
+    id: 'hard',
+    label: '어려움',
+    description: '실제 적용 조건과 한계 검토',
+  },
 ]
 
 const FIELD_OPTIONS: {
@@ -368,7 +381,7 @@ export default function SetupScreen({
               <span className="text-xs font-semibold text-slate-500">
                 질문 난이도
               </span>
-              <div className="flex gap-2">
+              <div className="grid gap-2 sm:grid-cols-3">
                 {DIFFICULTY_OPTIONS.map(
                   (option) => (
                     <button
@@ -378,13 +391,18 @@ export default function SetupScreen({
                         setDifficulty(option.id)
                       }
                       className={
-                        'flex-1 rounded-lg border-2 py-2 text-sm font-semibold transition-all ' +
+                        'rounded-lg border-2 px-3 py-2.5 text-left transition-all ' +
                         (difficulty === option.id
                           ? 'border-indigo-600 bg-indigo-50/40 text-indigo-700'
                           : 'border-slate-100 text-slate-500 hover:border-slate-200')
                       }
                     >
-                      {option.label}
+                      <span className="block text-sm font-semibold">
+                        {option.label}
+                      </span>
+                      <span className="mt-1 block text-[11px] font-normal leading-snug text-slate-500">
+                        {option.description}
+                      </span>
                     </button>
                   ),
                 )}

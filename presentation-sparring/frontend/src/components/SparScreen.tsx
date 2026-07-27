@@ -72,6 +72,10 @@ const QUESTION_STOPWORDS = new Set([
   '발표',
 ])
 
+// 백엔드는 난이도별로 기본 질문을 재생성하고, 이 값은 이미 받은 질문과
+// 꼬리질문을 화면에 중복 삽입하지 않기 위한 마지막 로컬 안전망입니다.
+const LOCAL_QUESTION_DUPLICATE_THRESHOLD = 0.72
+
 /** 질문 문자열의 중복 비교용 정규화. */
 function normalizeQuestion(question: string): string {
   return question.toLowerCase().replace(/[^a-z0-9가-힣]/g, '')
@@ -113,7 +117,10 @@ function isNearDuplicateQuestion(
     const intersection = [...candidateTokens].filter((token) =>
       previousTokens.has(token),
     )
-    return intersection.length / union.size >= 0.72
+    return (
+      intersection.length / union.size >=
+      LOCAL_QUESTION_DUPLICATE_THRESHOLD
+    )
   })
 }
 

@@ -30,6 +30,12 @@ export const SPEECH_METRIC_CONFIG = {
   minArticulationPauseMs: 250,
   minInternalPauseMs: 600,
   longPauseMs: 4000,
+  liveSilenceTipMs: 5000,
+  initialNoiseFloorRms: 0.003,
+  minimumLiveVoiceRms: 0.006,
+  liveVoiceNoiseMultiplier: 1.8,
+  noiseFloorPreviousWeight: 0.97,
+  noiseFloorSampleWeight: 0.03,
   minVoicedDurationForAnalysisMs: 4000,
   minArticulationDurationForPaceMs: 5000,
   minSyllablesForPace: 20,
@@ -308,9 +314,13 @@ function analyzeSegment(
 
   return {
     capturedDurationMs,
-    voicedDurationMs: Math.round(voicedDurationMs),
-    articulationDurationMs: Math.round(
-      articulationDurationMs,
+    voicedDurationMs: Math.min(
+      capturedDurationMs,
+      Math.round(voicedDurationMs),
+    ),
+    articulationDurationMs: Math.min(
+      capturedDurationMs,
+      Math.round(articulationDurationMs),
     ),
     initialLatencyMs: Math.round(frames[firstVoicedIndex].elapsed_ms),
     internalPausesMs,
@@ -516,13 +526,19 @@ export function buildSpeechMetrics(
     (sum, segment) => sum + segment.capturedDurationMs,
     0,
   )
-  const voicedDurationMs = analyzed.reduce(
-    (sum, segment) => sum + segment.voicedDurationMs,
-    0,
+  const voicedDurationMs = Math.min(
+    capturedDurationMs,
+    analyzed.reduce(
+      (sum, segment) => sum + segment.voicedDurationMs,
+      0,
+    ),
   )
-  const articulationDurationMs = analyzed.reduce(
-    (sum, segment) => sum + segment.articulationDurationMs,
-    0,
+  const articulationDurationMs = Math.min(
+    capturedDurationMs,
+    analyzed.reduce(
+      (sum, segment) => sum + segment.articulationDurationMs,
+      0,
+    ),
   )
   const sttWordCount = countSttWords(rawFinalSttText)
   const sttSyllableCount = countSttSyllables(rawFinalSttText)

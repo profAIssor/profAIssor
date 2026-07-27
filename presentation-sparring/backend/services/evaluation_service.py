@@ -1392,9 +1392,6 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
         slides=prompt_slides,
         question=req.question,
         answer=req.answer,
-        turn=req.turn,
-        # 서버 난이도 라우팅 전담을 위한 평가 LLM 꼬리질문 생성 비활성화
-        max_turns=0,
         term_hints=req.term_hints,
         difficulty=req.difficulty,
         root_question=req.root_question,
@@ -1403,7 +1400,6 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
         question_focus=req.question_focus,
         context_slides=req.context_slides,
         expected_answer_points=req.expected_answer_points,
-        is_no_answer=False,
     )
     try:
         data = llm_client.chat_json(

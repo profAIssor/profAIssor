@@ -14,7 +14,10 @@ import {
 import { coverageRate } from '../lib/coverage'
 import { loadSessions } from '../lib/sessionStore'
 import { SPEECH_METRIC_CONFIG } from '../lib/speechMetrics'
-import { formatMinutes } from '../lib/timing'
+import {
+  formatMinutes,
+  WORDS_PER_MINUTE,
+} from '../lib/timing'
 import { getPersona } from '../personas'
 import type {
   AnswerCoaching,
@@ -75,7 +78,7 @@ export default function ReportScreen({
   // 대본 어절 수 기준 예상 발표 시간 계산
   const estMinutes =
     scriptAvailable && report.word_count > 0
-      ? report.word_count / 120
+      ? report.word_count / WORDS_PER_MINUTE
       : 0
   const estSeconds = Math.round(estMinutes * 60)
   const uncovered = coverageAvailable

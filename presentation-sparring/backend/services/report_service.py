@@ -19,6 +19,7 @@ from schemas import (
     Revision,
     Slide,
     SlideCoverage,
+    TranscriptTurn,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,21 +162,20 @@ def _parse_speech_delivery_feedback(
     raw,
     *,
     has_speech_summary: bool,
-    fallback: str,
 ) -> str:
-    """LLM 음성 코칭의 허용 범위 검증 및 폴백 적용."""
+    """LLM 음성 코칭의 근거·표현·구체성 검증."""
     if not has_speech_summary:
         return ""
 
     if not isinstance(raw, str):
-        return fallback
+        return ""
 
     normalized = re.sub(r"\s+", " ", raw).strip()
     if not normalized or normalized.lower() in {
         "null",
         "none",
     }:
-        return fallback
+        return ""
 
     if any(
         prohibited in normalized
@@ -185,9 +185,47 @@ def _parse_speech_delivery_feedback(
             "Unsupported speech inference discarded: %s",
             normalized[:200],
         )
-        return fallback
+        return ""
+
+    # 분석 용어가 그대로 노출되거나 짧은 상투어로 끝난 결과는
+    # 실제 답변 맥락을 넣은 별도 생성 단계에서 다시 작성합니다.
+    sentence_count = len(re.findall(r"[.!?](?=\s|$)", normalized))
+    if (
+        "필러" in normalized
+        or len(normalized) < 45
+        or sentence_count < 2
+    ):
+        return ""
 
     return normalized[:800]
+
+
+def _generate_speech_delivery_feedback(
+    transcript: List[TranscriptTurn],
+    speech_context: str,
+    *,
+    draft: str,
+) -> str:
+    """측정값과 실제 답변을 근거로 음성 코칭만 집중 생성."""
+    system, user = report_prompt.build_speech_coaching_prompt(
+        transcript,
+        speech_context,
+        draft=draft,
+    )
+    try:
+        data = llm_client.chat_json(
+            system,
+            user,
+            kind="speech_coaching",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Speech coaching generation failed")
+        return ""
+
+    return _parse_speech_delivery_feedback(
+        data.get("speech_delivery_feedback"),
+        has_speech_summary=True,
+    )
 
 
 _VALID_ACTION_TYPES = {
@@ -722,15 +760,13 @@ def build_report(req: ReportRequest) -> ReportResponse:
     has_slides = bool(req.slides)
     coverage_available = has_script and has_slides
 
-    (
-        speech_summary,
-        deterministic_speech_feedback,
-    ) = speech_metrics.build_speech_report(
+    speech_summary = speech_metrics.build_speech_summary(
         req.transcript
     )
     speech_prompt_context = (
         speech_metrics.build_speech_prompt_context(
-            speech_summary
+            speech_summary,
+            req.transcript,
         )
     )
     system, user = report_prompt.build_report_prompt(
@@ -814,13 +850,21 @@ def build_report(req: ReportRequest) -> ReportResponse:
         answer_coaching,
     )
 
-    speech_delivery_feedback = (
-        _parse_speech_delivery_feedback(
-            data.get("speech_delivery_feedback"),
-            has_speech_summary=speech_summary is not None,
-            fallback=deterministic_speech_feedback,
-        )
+    raw_speech_feedback = data.get("speech_delivery_feedback")
+    speech_delivery_feedback = _parse_speech_delivery_feedback(
+        raw_speech_feedback,
+        has_speech_summary=speech_summary is not None,
     )
+    if speech_summary is not None and not speech_delivery_feedback:
+        speech_delivery_feedback = _generate_speech_delivery_feedback(
+            req.transcript,
+            speech_prompt_context,
+            draft=(
+                raw_speech_feedback
+                if isinstance(raw_speech_feedback, str)
+                else ""
+            ),
+        )
 
     content_feedback = str(
         data.get("content_feedback", "")

@@ -139,18 +139,16 @@ class SpeechMetrics(BaseModel):
     """답변 한 건의 브라우저 음성 분석 요약."""
 
     input_mode: SpeechInputMode
-    segment_count: int = Field(ge=1, le=30)
-    captured_duration_ms: int = Field(ge=0, le=30 * 60 * 1000)
-    voiced_duration_ms: int = Field(ge=0, le=30 * 60 * 1000)
+    segment_count: int = Field(ge=1)
+    captured_duration_ms: int = Field(ge=0)
+    voiced_duration_ms: int = Field(ge=0)
     articulation_duration_ms: int = Field(
         default=0,
         ge=0,
-        le=30 * 60 * 1000,
     )
     initial_response_latency_ms: Optional[int] = Field(
         default=None,
         ge=0,
-        le=10 * 60 * 1000,
     )
     stt_word_count: int = Field(ge=0, le=10000)
     stt_syllable_count: int = Field(default=0, ge=0, le=100000)
@@ -160,7 +158,6 @@ class SpeechMetrics(BaseModel):
     longest_pause_ms: Optional[int] = Field(
         default=None,
         ge=0,
-        le=30 * 60 * 1000,
     )
     volume_variation_db: Optional[float] = Field(
         default=None,
