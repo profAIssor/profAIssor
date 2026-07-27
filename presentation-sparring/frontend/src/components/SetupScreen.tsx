@@ -236,7 +236,7 @@ export default function SetupScreen({
         </div>
         <p className="mt-2 text-sm text-slate-500">
           {isEnglish
-            ? '영문 발표 자료를 바탕으로 영어 질문과 영어 음성 답변을 연습합니다.'
+            ? '발표 자료를 바탕으로 예상 영어 질문과 영어 음성 답변을 연습하는 질의응답 스파링 도구'
             : '발표 자료를 바탕으로 예상 질문과 답변 대응을 연습하는 질의응답 스파링 도구'}
         </p>
       </div>
@@ -257,10 +257,6 @@ export default function SetupScreen({
                 예시 데이터로 채우기
               </button>
             </div>
-            <p className="text-xs leading-relaxed text-slate-400">
-              실제 발표 대본을 입력하면 시스템이 슬라이드 순서를 고려해 관련 구간을 내부적으로 추정합니다.
-              추정 결과는 별도 계획 화면에 표시하지 않고 질문 생성과 답변 평가의 근거로만 사용합니다.
-            </p>
             <textarea
               value={script}
               onChange={(
@@ -278,9 +274,7 @@ export default function SetupScreen({
               발표자료 슬라이드 텍스트
             </label>
             <p className="text-xs leading-relaxed text-slate-400">
-              PPTX 또는 PDF를 최대 60장까지 업로드할 수 있습니다. PDF의 시각적 줄바꿈은
-              서버에서 문장 흐름에 맞게 정리한 뒤 표시합니다. 추출 결과가 어색한 부분은 직접
-              수정할 수 있습니다.
+              PPTX 또는 PDF를 최대 60장까지 업로드할 수 있으며, 추출 결과는 직접 수정할 수 있습니다.
             </p>
             <SlideInput
               slides={slides}

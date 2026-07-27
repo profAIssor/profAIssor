@@ -159,68 +159,83 @@ function resolveNextAction(
 }
 
 
-const GENERAL_RECOVERY_TIPS = [
-  (
-    '질문을 한 문장으로 짧게 되짚으며 ' +
-    '“질문하신 핵심은 …로 이해했습니다.”라고 말해 보세요. ' +
-    '질문을 정확히 확인하면서 답변을 정리할 시간을 확보할 수 있습니다.'
-  ),
-  (
-    '급하게 말을 채우지 말고 한두 박자 쉬어도 괜찮습니다. ' +
-    '숨을 천천히 내쉰 뒤 “먼저 결론부터 말씀드리면…”으로 시작해 보세요.'
-  ),
-  (
-    '바로 답이 떠오르지 않으면 “두 가지로 나누어 말씀드리겠습니다.”라고 ' +
-    '답변 범위를 먼저 정한 뒤, 첫 번째 내용부터 천천히 이어가 보세요.'
-  ),
-  (
-    '질문이 넓거나 의미가 애매하면 ' +
-    '“말씀하신 부분을 … 관점으로 이해하면 될까요?”라고 확인해도 됩니다. ' +
-    '질문을 다시 확인하는 것은 회피가 아니라 정확한 답변을 위한 과정입니다.'
-  ),
-  (
-    '정확한 세부사항이 떠오르지 않으면 ' +
-    '“정확한 수치는 추가 확인이 필요하지만, 현재 말씀드릴 수 있는 범위는 …입니다.”라고 ' +
-    '아는 범위와 확인이 필요한 범위를 나누어 답해 보세요.'
-  ),
-  (
-    '답변을 짧게 정리하려면 결론→이유→예시→결론 순서를 사용해 보세요. ' +
-    '우선 결론 한 문장만 말하면 다음 내용을 이어가기 쉬워집니다.'
-  ),
-] as const
+interface RecoveryTip {
+  guide: string
+  example: Record<SparringLanguage, string>
+}
 
-const SLIDE_RECOVERY_TIPS = [
-  (
-    '관련 슬라이드로 시선을 옮기며 ' +
-    '“자료를 기준으로 순서대로 설명드리겠습니다.”라고 말해 보세요. ' +
-    '해당 부분을 손으로 가리키며 답변을 이어가도 좋습니다.'
-  ),
-  (
-    '관련 슬라이드를 찾는 동안 ' +
-    '“질문과 연결되는 자료를 보면서 설명드리겠습니다.”라고 안내해 보세요. ' +
-    '슬라이드를 확인하는 짧은 시간도 자연스러운 발표 진행의 일부입니다.'
-  ),
-  (
-    '표나 그림이 있다면 제목이나 축을 먼저 가리키며 ' +
-    '“이 자료에서 먼저 보셔야 할 부분은 …입니다.”라고 시작해 보세요. ' +
-    '시각 자료를 기준점으로 삼으면 말의 흐름을 다시 잡기 쉽습니다.'
-  ),
-] as const
+const GENERAL_RECOVERY_TIPS: readonly RecoveryTip[] = [
+  {
+    guide: '질문을 한 문장으로 짧게 되짚으면 질문을 정확히 확인하면서 답변을 정리할 시간을 확보할 수 있습니다. 이렇게 말해 보세요: {example}',
+    example: {
+      ko: '“질문하신 핵심은 …로 이해했습니다.”',
+      en: '“If I understand correctly, the key point is …”',
+    },
+  },
+  {
+    guide: '급하게 말을 채우지 말고 한두 박자 쉬어도 괜찮습니다. 숨을 천천히 내쉰 뒤 이렇게 시작해 보세요: {example}',
+    example: {
+      ko: '“먼저 결론부터 말씀드리면…”',
+      en: '“The main point is …”',
+    },
+  },
+  {
+    guide: '바로 답이 떠오르지 않으면 답변 범위를 먼저 정한 뒤 첫 번째 내용부터 이어가 보세요: {example}',
+    example: {
+      ko: '“두 가지로 나누어 말씀드리겠습니다.”',
+      en: '“I would break this into two points.”',
+    },
+  },
+  {
+    guide: '질문이 넓거나 의미가 애매하면 다시 확인해도 됩니다. 이는 회피가 아니라 정확한 답변을 위한 과정입니다: {example}',
+    example: {
+      ko: '“말씀하신 부분을 … 관점으로 이해하면 될까요?”',
+      en: '“Should I address this from the perspective of …?”',
+    },
+  },
+  {
+    guide: '정확한 세부사항이 떠오르지 않으면 아는 범위와 확인이 필요한 범위를 나누어 답해 보세요: {example}',
+    example: {
+      ko: '“정확한 수치는 추가 확인이 필요하지만, 현재 말씀드릴 수 있는 범위는 …입니다.”',
+      en: '“I would need to verify the exact figure, but the key mechanism is …”',
+    },
+  },
+  {
+    guide: '답변을 짧게 정리하려면 결론→이유→예시→결론 순서를 사용해 보세요. 우선 결론 한 문장만 말하면 다음 내용을 이어가기 쉽습니다: {example}',
+    example: {
+      ko: '“결론부터 말씀드리면 …입니다.”',
+      en: '“To start with the conclusion, …”',
+    },
+  },
+]
 
-const ENGLISH_GENERAL_RECOVERY_TIPS = [
-  'Briefly restate the question: “If I understand correctly, the key point is …” This confirms the question and gives you a moment to organize your answer.',
-  'A short pause is fine. Breathe out slowly, then begin with “The main point is …”',
-  'If the answer is not immediate, set a structure first: “I would break this into two points.” Then start with the first point.',
-  'If the question is broad or ambiguous, ask: “Should I address this from the perspective of …?” Clarifying the scope is part of answering accurately.',
-  'If you cannot recall an exact detail, separate what you know from what needs checking: “I would need to verify the exact figure, but the key mechanism is …”',
-  'Use a short answer structure: conclusion → reason → example → conclusion. Starting with one clear conclusion makes the rest easier to deliver.',
-] as const
+const SLIDE_RECOVERY_TIPS: readonly RecoveryTip[] = [
+  {
+    guide: '관련 슬라이드로 시선을 옮겨 해당 부분을 가리키며 답변을 이어가 보세요: {example}',
+    example: {
+      ko: '“자료를 기준으로 순서대로 설명드리겠습니다.”',
+      en: '“Let me walk through this using the slide.”',
+    },
+  },
+  {
+    guide: '관련 슬라이드를 찾는 동안 먼저 안내 문장을 말해 보세요. 슬라이드를 확인하는 짧은 시간도 자연스러운 발표 진행의 일부입니다: {example}',
+    example: {
+      ko: '“질문과 연결되는 자료를 보면서 설명드리겠습니다.”',
+      en: '“I will refer to the material connected to your question.”',
+    },
+  },
+  {
+    guide: '표나 그림이 있다면 제목이나 축을 먼저 가리키며 시작해 보세요. 시각 자료를 기준점으로 삼으면 말의 흐름을 다시 잡기 쉽습니다: {example}',
+    example: {
+      ko: '“이 자료에서 먼저 보셔야 할 부분은 …입니다.”',
+      en: '“The first thing to notice here is …”',
+    },
+  },
+]
 
-const ENGLISH_SLIDE_RECOVERY_TIPS = [
-  'Turn to the relevant slide and say, “Let me walk through this using the slide.” Use the visual as the structure for your answer.',
-  'While locating the relevant slide, say, “I’ll refer to the material connected to your question.” A brief pause to check the slide is natural.',
-  'If the slide contains a chart or diagram, begin with its title or axis: “The first thing to notice here is …”',
-] as const
+function renderRecoveryTip(tip: RecoveryTip, language: SparringLanguage): string {
+  return tip.guide.replace('{example}', tip.example[language])
+}
 
 /** 내용 힌트 없이 발표 진행 시간을 확보하는 침묵 회복 팁 생성. */
 function buildLongSilenceTip(
@@ -228,19 +243,9 @@ function buildLongSilenceTip(
   tipSequence: number,
   language: SparringLanguage,
 ): string {
-  const tips = language === 'en'
-    ? (
-        questionState.contextSlides.length > 0
-          ? [...ENGLISH_GENERAL_RECOVERY_TIPS, ...ENGLISH_SLIDE_RECOVERY_TIPS]
-          : [...ENGLISH_GENERAL_RECOVERY_TIPS]
-      )
-    :
-    questionState.contextSlides.length > 0
-      ? [
-          ...GENERAL_RECOVERY_TIPS,
-          ...SLIDE_RECOVERY_TIPS,
-        ]
-      : [...GENERAL_RECOVERY_TIPS]
+  const tips: readonly RecoveryTip[] = questionState.contextSlides.length > 0
+    ? [...GENERAL_RECOVERY_TIPS, ...SLIDE_RECOVERY_TIPS]
+    : GENERAL_RECOVERY_TIPS
 
   const questionSeed = Array.from(
     questionState.question,
@@ -252,7 +257,7 @@ function buildLongSilenceTip(
   const selectedIndex =
     Math.abs(questionSeed + tipSequence) % tips.length
 
-  return tips[selectedIndex]
+  return renderRecoveryTip(tips[selectedIndex], language)
 }
 
 /** 발표 자료 기반 질의응답 진행 및 질문 역할별 상태 관리. */
