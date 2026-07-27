@@ -87,9 +87,12 @@ export function useMicMetrics(): UseMicMetricsResult {
   const disposedRef = useRef(false)
 
   const liveSilenceStateRef = useRef<LiveSilenceState>({
-    noiseFloorRms: 0.003,
+    noiseFloorRms:
+      SPEECH_METRIC_CONFIG.initialNoiseFloorRms,
     silenceStartedAtMs: 0,
   })
+  // 한 답변에서 마이크를 여러 번 켜도 침묵 팁은 한 번만 표시합니다.
+  // finalizeAnswer/resetAnswer에서 다음 답변을 위해 초기화합니다.
   const longSilenceTipShownRef = useRef(false)
 
   /** RMS 수집 타이머 정리. */
@@ -322,7 +325,8 @@ export function useMicMetrics(): UseMicMetricsResult {
           frames: [],
         }
         liveSilenceStateRef.current = {
-          noiseFloorRms: 0.003,
+          noiseFloorRms:
+            SPEECH_METRIC_CONFIG.initialNoiseFloorRms,
           silenceStartedAtMs: startedAtMs,
         }
         setRecording(true)
@@ -358,8 +362,9 @@ export function useMicMetrics(): UseMicMetricsResult {
           const liveState =
             liveSilenceStateRef.current
           const voiceThreshold = Math.max(
-            0.006,
-            liveState.noiseFloorRms * 1.8,
+            SPEECH_METRIC_CONFIG.minimumLiveVoiceRms,
+            liveState.noiseFloorRms *
+              SPEECH_METRIC_CONFIG.liveVoiceNoiseMultiplier,
           )
           const isVoiceFrame = rms >= voiceThreshold
 
@@ -370,13 +375,15 @@ export function useMicMetrics(): UseMicMetricsResult {
           } else {
             // 정적 환경 변화 반영을 위한 배경 소음 기준 보정
             liveState.noiseFloorRms =
-              liveState.noiseFloorRms * 0.97 +
-              rms * 0.03
+              liveState.noiseFloorRms *
+                SPEECH_METRIC_CONFIG.noiseFloorPreviousWeight +
+              rms *
+                SPEECH_METRIC_CONFIG.noiseFloorSampleWeight
 
             if (
               sampledAtMs -
                 liveState.silenceStartedAtMs >=
-                5_000 &&
+                SPEECH_METRIC_CONFIG.liveSilenceTipMs &&
               !longSilenceTipShownRef.current
             ) {
               longSilenceTipShownRef.current = true

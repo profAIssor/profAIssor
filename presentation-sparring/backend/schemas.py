@@ -22,7 +22,14 @@ EvaluationNextAction = Literal[
 ]
 SpeechInputMode = Literal["speech", "mixed"]
 SpeechMetricConfidence = Literal["high", "medium", "low"]
-PaceStatus = Literal["slow", "balanced", "fast"]
+PaceStatus = Literal[
+    "slow",
+    "slightly_slow",
+    "calm",
+    "balanced",
+    "slightly_fast",
+    "fast",
+]
 VolumeVariationStatus = Literal["low", "moderate", "high"]
 FillerCountMode = Literal["recognized_minimum", "unavailable", "legacy_script"]
 
@@ -56,6 +63,13 @@ class QuestionRequest(BaseModel):
     excluded_questions: List[str] = Field(default_factory=list)
 
 
+class SpeechTermAlias(BaseModel):
+    """자료 원문의 영문 용어와 ko-KR STT에서 예상되는 한글 발음 표기."""
+
+    canonical: str
+    aliases: List[str] = Field(default_factory=list)
+
+
 class QuestionResponse(BaseModel):
     question: str
     question_type: QuestionType
@@ -63,6 +77,7 @@ class QuestionResponse(BaseModel):
     question_focus: str = ""
     context_slides: List[int] = Field(default_factory=list)
     expected_answer_points: List[str] = Field(default_factory=list)
+    speech_term_aliases: List[SpeechTermAlias] = Field(default_factory=list)
 
 
 # --- /api/evaluate ---
@@ -103,6 +118,9 @@ class EvaluateResponse(BaseModel):
     followup_question_type: Optional[QuestionType] = None
     followup_focus: str = ""
     followup_expected_answer_points: List[str] = Field(default_factory=list)
+    followup_speech_term_aliases: List[SpeechTermAlias] = Field(
+        default_factory=list
+    )
 
     # 무응답 뒤 질문 수를 차감하지 않는 재질문 계약
     supplement: Optional[str] = None
@@ -111,6 +129,9 @@ class EvaluateResponse(BaseModel):
     retry_question_type: Optional[QuestionType] = None
     retry_question_focus: str = ""
     retry_expected_answer_points: List[str] = Field(default_factory=list)
+    retry_speech_term_aliases: List[SpeechTermAlias] = Field(
+        default_factory=list
+    )
 
 
 # --- /api/report ---
@@ -118,22 +139,25 @@ class SpeechMetrics(BaseModel):
     """답변 한 건의 브라우저 음성 분석 요약."""
 
     input_mode: SpeechInputMode
-    segment_count: int = Field(ge=1, le=30)
-    captured_duration_ms: int = Field(ge=0, le=30 * 60 * 1000)
-    voiced_duration_ms: int = Field(ge=0, le=30 * 60 * 1000)
+    segment_count: int = Field(ge=1)
+    captured_duration_ms: int = Field(ge=0)
+    voiced_duration_ms: int = Field(ge=0)
+    articulation_duration_ms: int = Field(
+        default=0,
+        ge=0,
+    )
     initial_response_latency_ms: Optional[int] = Field(
         default=None,
         ge=0,
-        le=10 * 60 * 1000,
     )
     stt_word_count: int = Field(ge=0, le=10000)
+    stt_syllable_count: int = Field(default=0, ge=0, le=100000)
     pace_wpm: Optional[float] = Field(default=None, ge=0, le=1000)
     internal_pause_count: int = Field(ge=0, le=10000)
     long_pause_count: int = Field(ge=0, le=10000)
     longest_pause_ms: Optional[int] = Field(
         default=None,
         ge=0,
-        le=30 * 60 * 1000,
     )
     volume_variation_db: Optional[float] = Field(
         default=None,
@@ -152,6 +176,10 @@ class SpeechMetrics(BaseModel):
             raise ValueError(
                 "voiced_duration_ms는 captured_duration_ms보다 클 수 없습니다."
             )
+        if self.articulation_duration_ms > self.captured_duration_ms:
+            raise ValueError(
+                "articulation_duration_ms는 captured_duration_ms보다 클 수 없습니다."
+            )
         if self.long_pause_count > self.internal_pause_count:
             raise ValueError(
                 "long_pause_count는 internal_pause_count보다 클 수 없습니다."
@@ -164,9 +192,12 @@ class SpeechSummary(BaseModel):
 
     measured_answer_count: int = Field(ge=0)
     reliable_answer_count: int = Field(ge=0)
+    pace_answer_count: int = Field(default=0, ge=0)
     total_answer_count: int = Field(ge=0)
+    total_captured_duration_ms: int = Field(ge=0)
     total_voiced_duration_ms: int = Field(ge=0)
     session_pace_wpm: Optional[float] = Field(default=None, ge=0, le=1000)
+    session_pace_sps: Optional[float] = Field(default=None, ge=0, le=20)
     pace_status: Optional[PaceStatus] = None
     long_pause_count: int = Field(ge=0)
     longest_pause_ms: Optional[int] = Field(default=None, ge=0)
@@ -182,6 +213,10 @@ class SpeechSummary(BaseModel):
         if self.reliable_answer_count > self.measured_answer_count:
             raise ValueError(
                 "reliable_answer_count는 measured_answer_count보다 클 수 없습니다."
+            )
+        if self.pace_answer_count > self.reliable_answer_count:
+            raise ValueError(
+                "pace_answer_count는 reliable_answer_count보다 클 수 없습니다."
             )
         if self.measured_answer_count > self.total_answer_count:
             raise ValueError(

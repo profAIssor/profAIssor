@@ -46,6 +46,7 @@ RequestKind = Literal[
     "followup",
     "unknown_closure",
     "report",
+    "speech_coaching",
     "reference_repair",
     "chat",
 ]
@@ -83,6 +84,7 @@ _MAX_OUTPUT_TOKENS = {
     "followup": 700,
     "unknown_closure": 900,
     "report": 4096,
+    "speech_coaching": 500,
     "reference_repair": 1800,
     "chat": 1200,
 }
@@ -225,6 +227,7 @@ def _call_gemini(
         f"{model}:generateContent?key={api_key}"
     )
 
+    started_at = time.perf_counter()
     temperature, max_tokens = _sampling_config(request_kind)
 
     response = _SESSION.post(
@@ -253,9 +256,63 @@ def _call_gemini(
     )
     response.raise_for_status()
 
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     data = response.json()
-    parts = data["candidates"][0]["content"]["parts"]
-    return "".join(part.get("text", "") for part in parts)
+    if not isinstance(data, dict):
+        raise RuntimeError("Gemini returned an invalid response object")
+
+    usage = data.get("usageMetadata")
+    usage = usage if isinstance(usage, dict) else {}
+
+    def usage_count(key: str) -> int:
+        value = usage.get(key, 0)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    _log_usage(
+        provider="gemini",
+        model=model,
+        request_kind=request_kind,
+        input_tokens=usage_count("promptTokenCount"),
+        output_tokens=usage_count("candidatesTokenCount"),
+        total_tokens=usage_count("totalTokenCount"),
+        elapsed_ms=elapsed_ms,
+    )
+
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        prompt_feedback = data.get("promptFeedback")
+        block_reason = (
+            prompt_feedback.get("blockReason")
+            if isinstance(prompt_feedback, dict)
+            else None
+        )
+        detail = f"block_reason={block_reason}" if block_reason else "no candidates"
+        raise RuntimeError(f"Gemini returned no usable candidate ({detail})")
+
+    candidate = candidates[0]
+    if not isinstance(candidate, dict):
+        raise RuntimeError("Gemini returned an invalid candidate")
+
+    finish_reason = str(candidate.get("finishReason") or "unknown")
+    content = candidate.get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if not isinstance(parts, list) or not parts:
+        raise RuntimeError(
+            "Gemini candidate contained no response parts "
+            f"(finish_reason={finish_reason})"
+        )
+
+    text = "".join(
+        part.get("text", "")
+        for part in parts
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    )
+    if not text.strip():
+        raise RuntimeError(
+            "Gemini candidate contained no response text "
+            f"(finish_reason={finish_reason})"
+        )
+    return text
 
 
 def _extract_section(text: str, header: str) -> str:
@@ -572,7 +629,9 @@ def _call_mock(
     if '"targets_slide"' in system:
         return json.dumps(_mock_question(system, user), ensure_ascii=False)
 
-    if '"verdict"' in system and '"followup"' in system:
+    if request_kind == "evaluate" or (
+        '"verdict"' in system and '"followup"' in system
+    ):
         answer_status = _extract_section(user, "답변 상태 사전 판정")
 
         # 서버가 answered로 사전 판정했더라도, 뉘앙스형 답변 불가라면

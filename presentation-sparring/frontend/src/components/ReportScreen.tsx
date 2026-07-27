@@ -10,14 +10,18 @@ import {
   RotateCcw,
   Shield,
   Target,
-  Volume2,
 } from 'lucide-react'
 import { coverageRate } from '../lib/coverage'
 import { loadSessions } from '../lib/sessionStore'
-import { formatMinutes } from '../lib/timing'
+import { SPEECH_METRIC_CONFIG } from '../lib/speechMetrics'
+import {
+  formatMinutes,
+  WORDS_PER_MINUTE,
+} from '../lib/timing'
 import { getPersona } from '../personas'
 import type {
   AnswerCoaching,
+  PaceStatus,
   Report,
   RevisionActionType,
   SpeechMetrics,
@@ -45,6 +49,19 @@ function confidenceLabel(
   return '낮음'
 }
 
+/** 계산된 답변 속도를 발표자가 바로 이해할 수 있는 말로 표시합니다. */
+function paceStatusLabel(
+  status: PaceStatus | null,
+): string {
+  if (status === 'slow') return '매우 느린 편'
+  if (status === 'slightly_slow') return '다소 느린 편'
+  if (status === 'calm') return '차분한 속도'
+  if (status === 'balanced') return '일반적인 속도'
+  if (status === 'slightly_fast') return '다소 빠른 편'
+  if (status === 'fast') return '매우 빠른 편'
+  return '판정 보류'
+}
+
 export default function ReportScreen({
   report,
   transcript,
@@ -61,7 +78,7 @@ export default function ReportScreen({
   // 대본 어절 수 기준 예상 발표 시간 계산
   const estMinutes =
     scriptAvailable && report.word_count > 0
-      ? report.word_count / 120
+      ? report.word_count / WORDS_PER_MINUTE
       : 0
   const estSeconds = Math.round(estMinutes * 60)
   const uncovered = coverageAvailable
@@ -91,6 +108,13 @@ export default function ReportScreen({
       : null
 
   const speechSummary = report.speech_summary ?? null
+  const averageAnswerDurationMs =
+    speechSummary &&
+    speechSummary.measured_answer_count > 0 &&
+    typeof speechSummary.total_captured_duration_ms === 'number'
+      ? speechSummary.total_captured_duration_ms /
+        speechSummary.measured_answer_count
+      : null
   const coachingByTurn = new Map(
     (report.answer_coaching ?? []).map(
       (coaching) => [
@@ -156,40 +180,37 @@ export default function ReportScreen({
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <SpeechStat
               icon={<Gauge className="h-4 w-4" />}
-              label="합산 말 빠르기"
-              value={
+              label="답변 속도"
+              value={paceStatusLabel(speechSummary.pace_status)}
+              detail={
                 speechSummary.session_pace_wpm == null
-                  ? '판정 보류'
+                  ? undefined
                   : `${speechSummary.session_pace_wpm.toFixed(1)}어절/분`
               }
+            />
+            <SpeechStat
+              icon={<Clock3 className="h-4 w-4" />}
+              label="평균 답변 시간"
+              value={formatSeconds(averageAnswerDurationMs)}
+              detail="질문 하나에 답한 시간"
             />
             <SpeechStat
               icon={<Pause className="h-4 w-4" />}
               label="긴 멈춤"
               value={`${speechSummary.long_pause_count}회`}
               detail={
-                speechSummary.longest_pause_ms == null
-                  ? '최장 멈춤 없음'
+                speechSummary.long_pause_count === 0
+                  ? `${SPEECH_METRIC_CONFIG.longPauseMs / 1000}초 이상 없음`
                   : `최장 ${formatSeconds(
                       speechSummary.longest_pause_ms,
                     )}`
               }
             />
             <SpeechStat
-              icon={<Clock3 className="h-4 w-4" />}
-              label="평균 답변 착수"
-              value={formatSeconds(
-                speechSummary.average_initial_latency_ms,
-              )}
-            />
-            <SpeechStat
-              icon={<Volume2 className="h-4 w-4" />}
-              label="상대 음량 변화"
-              value={
-                speechSummary.volume_variation_db == null
-                  ? '판정 보류'
-                  : `${speechSummary.volume_variation_db.toFixed(1)}dB`
-              }
+              icon={<Mic className="h-4 w-4" />}
+              label="확인된 필러 언어"
+              value={`최소 ${speechSummary.recognized_filler_count}회`}
+              detail="음·어 등 인식된 값"
             />
           </div>
 
@@ -200,7 +221,7 @@ export default function ReportScreen({
           )}
 
           <p className="text-xs leading-relaxed text-slate-500">
-            필러는 Chrome STT 처리 중 명확히 확인된 값만 계산하므로 실제
+            필러 언어는 Chrome STT 처리 중 명확히 확인된 값만 계산하므로 실제
             사용 횟수보다 적게 표시될 수 있습니다.
           </p>
         </section>
@@ -356,25 +377,7 @@ export default function ReportScreen({
         />
       </section>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <Metric
-          label="음성 답변 속도"
-          value={
-            speechSummary?.session_pace_wpm == null
-              ? '미측정'
-              : `${speechSummary.session_pace_wpm.toFixed(1)}어절/분`
-          }
-          hint="순수 발화 시간 기준"
-        />
-        <Metric
-          label="명확한 필러"
-          value={
-            speechSummary
-              ? `최소 ${speechSummary.recognized_filler_count}회`
-              : '미측정'
-          }
-          hint="STT 인식 하한선"
-        />
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Metric
           label="총 어절 수"
           value={`${report.word_count}어절`}
@@ -621,32 +624,24 @@ function TurnSpeechMetrics({ metrics }: { metrics: SpeechMetrics }) {
   return (
     <div className="space-y-2 rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-2.5">
       <div className="flex flex-wrap gap-1.5 text-[11px]">
+        <SpeechBadge>
+          답변 시간 {formatSeconds(metrics.captured_duration_ms)}
+        </SpeechBadge>
         {metrics.confidence !== 'low' && metrics.pace_wpm != null && (
           <SpeechBadge>
-            속도 {metrics.pace_wpm.toFixed(1)}어절/분
+            답변 속도 {metrics.pace_wpm.toFixed(1)}어절/분
           </SpeechBadge>
         )}
-        {metrics.confidence !== 'low' &&
-          metrics.initial_response_latency_ms != null && (
-            <SpeechBadge>
-              답변 시작 {formatSeconds(metrics.initial_response_latency_ms)}
-            </SpeechBadge>
-          )}
         {metrics.confidence !== 'low' && (
           <SpeechBadge>
             긴 멈춤 {metrics.long_pause_count}회
           </SpeechBadge>
         )}
         {metrics.confidence !== 'low' &&
+          metrics.long_pause_count > 0 &&
           metrics.longest_pause_ms != null && (
             <SpeechBadge>
               최장 {formatSeconds(metrics.longest_pause_ms)}
-            </SpeechBadge>
-          )}
-        {metrics.confidence !== 'low' &&
-          metrics.volume_variation_db != null && (
-            <SpeechBadge>
-              음량 변화 {metrics.volume_variation_db.toFixed(1)}dB
             </SpeechBadge>
           )}
         <SpeechBadge>

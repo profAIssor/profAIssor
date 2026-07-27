@@ -4,7 +4,12 @@ import { evaluateAnswer, fetchQuestion } from '../api'
 import { useMicMetrics } from '../hooks/useMicMetrics'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
 import { getBrowserSupport } from '../lib/browserSupport'
-import { buildTermDictionary, correctText } from '../lib/termCorrection'
+import {
+  buildSpeechContextPhrases,
+  buildTermDictionary,
+  correctText,
+  mergeSpeechTermAliases,
+} from '../lib/termCorrection'
 import { getPersona } from '../personas'
 import type {
   AcademicField,
@@ -17,6 +22,7 @@ import type {
   QuestionType,
   Slide,
   SpeechMetrics,
+  SpeechTermAlias,
   TranscriptTurn,
 } from '../types'
 
@@ -39,6 +45,7 @@ interface QuestionState {
   questionFocus: string
   contextSlides: number[]
   expectedAnswerPoints: string[]
+  speechTermAliases: SpeechTermAlias[]
 }
 
 
@@ -64,6 +71,10 @@ const QUESTION_STOPWORDS = new Set([
   '자료',
   '발표',
 ])
+
+// 백엔드는 난이도별로 기본 질문을 재생성하고, 이 값은 이미 받은 질문과
+// 꼬리질문을 화면에 중복 삽입하지 않기 위한 마지막 로컬 안전망입니다.
+const LOCAL_QUESTION_DUPLICATE_THRESHOLD = 0.72
 
 /** 질문 문자열의 중복 비교용 정규화. */
 function normalizeQuestion(question: string): string {
@@ -106,7 +117,10 @@ function isNearDuplicateQuestion(
     const intersection = [...candidateTokens].filter((token) =>
       previousTokens.has(token),
     )
-    return intersection.length / union.size >= 0.72
+    return (
+      intersection.length / union.size >=
+      LOCAL_QUESTION_DUPLICATE_THRESHOLD
+    )
   })
 }
 
@@ -238,6 +252,44 @@ export default function SparScreen({
     () => buildTermDictionary(script, slides),
     [script, slides],
   )
+  const speechContextPhrases = useMemo(() => {
+    if (!questionState) return []
+
+    const contextSlideIndices = new Set(
+      questionState.contextSlides,
+    )
+    return buildSpeechContextPhrases({
+      question: questionState.question,
+      slides: slides.filter((slide) =>
+        contextSlideIndices.has(slide.index),
+      ),
+    })
+  }, [questionState, slides])
+  const speechTermAliases = useMemo(
+    () => questionState?.speechTermAliases ?? [],
+    [questionState],
+  )
+  const speechRecognitionPhrases = useMemo(
+    () => [
+      ...new Set([
+        ...speechContextPhrases,
+        ...speechTermAliases.flatMap(({ canonical, aliases }) => [
+          canonical,
+          ...aliases,
+        ]),
+      ]),
+    ],
+    [speechContextPhrases, speechTermAliases],
+  )
+  const evaluationTermHints = useMemo(
+    () => [
+      ...new Set([
+        ...speechContextPhrases,
+        ...termDict,
+      ]),
+    ],
+    [speechContextPhrases, termDict],
+  )
 
   const {
     available: metricAvailable,
@@ -260,26 +312,42 @@ export default function SparScreen({
     getRecognizedFillerMinimum,
     resetTranscript,
   } = useSpeechRecognition({
+    contextPhrases: speechRecognitionPhrases,
     onFinal: (text) => {
       if (!text) return
-      const corrected = correctText(text, termDict)
-
-      setAnswer((previous) => {
-        const nextAnswer =
-          (previous.trim() ? `${previous.trimEnd()} ` : '') + corrected
-        answerRef.current = nextAnswer
-        return nextAnswer
-      })
+      const previous = answerRef.current
+      const combined =
+        (previous.trim()
+          ? `${previous.trimEnd()} `
+          : '') + text
+      const nextAnswer = correctText(
+        combined,
+        speechContextPhrases,
+        speechTermAliases,
+      )
+      answerRef.current = nextAnswer
+      setAnswer(nextAnswer)
     },
-    onInterim: setInterim,
+    onInterim: (text) =>
+      setInterim(
+        correctText(
+          text,
+          speechContextPhrases,
+          speechTermAliases,
+        ),
+      ),
   })
 
   const activePersonaId = personaIds[personaIndex]
   const persona = getPersona(activePersonaId)
   const totalQuestionCount = maxTurns + 1
-  const remainingQuestionCount = Math.max(0, totalQuestionCount - turn)
+  const remainingQuestionCount = readyForReport
+    ? 0
+    : Math.max(0, totalQuestionCount - turn)
   const isUnknownRetryQuestion = questionState?.questionRole === 'retry'
   const displayedMicError = micError ?? metricError
+  const voiceInputAvailable =
+    browserSupport.supported && sttSupported
 
   const pushMessage = (message: ChatMessage) => {
     setMessages((previous) => [...previous, message])
@@ -309,6 +377,7 @@ export default function SparScreen({
       questionFocus: response.question_focus,
       contextSlides: response.context_slides,
       expectedAnswerPoints: response.expected_answer_points,
+      speechTermAliases: response.speech_term_aliases ?? [],
     }
     setTurn(targetTurn)
     setQuestionState(nextState)
@@ -445,7 +514,13 @@ export default function SparScreen({
 
   /** STT와 RMS 수집의 사용자 마이크 버튼 동기화. */
   const handleMicToggle = async () => {
-    if (busy || !questionState) return
+    if (
+      busy ||
+      !questionState ||
+      !voiceInputAvailable
+    ) {
+      return
+    }
 
     if (listening) {
       stopUserSegment()
@@ -454,11 +529,10 @@ export default function SparScreen({
       return
     }
 
+    const started = startMic()
     const metricStarted = metricAvailable
       ? await startUserSegment()
       : false
-
-    const started = startMic()
     if (!started && metricStarted) {
       stopUserSegment()
     }
@@ -515,7 +589,7 @@ export default function SparScreen({
         maxTurns,
         difficulty,
         field,
-        termHints: termDict,
+        termHints: evaluationTermHints,
       })
 
       const action = resolveNextAction(
@@ -563,6 +637,10 @@ export default function SparScreen({
             evaluation.retry_expected_answer_points.length > 0
               ? evaluation.retry_expected_answer_points
               : currentState.expectedAnswerPoints,
+          speechTermAliases: mergeSpeechTermAliases(
+            currentState.speechTermAliases,
+            evaluation.retry_speech_term_aliases ?? [],
+          ),
         })
         currentQuestionChainRef.current = [
           ...currentQuestionChainRef.current,
@@ -689,6 +767,10 @@ export default function SparScreen({
             evaluation.followup_expected_answer_points.length > 0
               ? evaluation.followup_expected_answer_points
               : currentState.expectedAnswerPoints,
+          speechTermAliases: mergeSpeechTermAliases(
+            currentState.speechTermAliases,
+            evaluation.followup_speech_term_aliases ?? [],
+          ),
         })
         currentQuestionChainRef.current = [
           ...currentQuestionChainRef.current,
@@ -732,19 +814,6 @@ export default function SparScreen({
     }
   }
 
-  if (!browserSupport.supported) {
-    return (
-      <div className="mx-auto max-w-2xl rounded-3xl border border-amber-200 bg-white p-8 text-center shadow-sm">
-        <div className="text-lg font-bold text-slate-900">
-          음성 스파링 지원 환경 확인
-        </div>
-        <p className="mt-3 text-sm leading-relaxed text-slate-600">
-          {browserSupport.message}
-        </p>
-      </div>
-    )
-  }
-
   return (
     <div className="mx-auto flex h-[calc(100dvh-8.5rem)] min-h-[480px] w-full max-w-4xl flex-col gap-4 sm:h-[calc(100dvh-10rem)] sm:min-h-[560px]">
       <div className="flex shrink-0 flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white px-4 py-3.5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -757,9 +826,11 @@ export default function SparScreen({
             <div className="text-sm text-slate-500">
               남은 질문 횟수 {remainingQuestionCount}회
               <span className="ml-1.5 text-xs text-slate-400">
-                {isUnknownRetryQuestion
-                  ? '(현재 재질문은 차감 제외)'
-                  : '(현재 질문 포함)'}
+                {readyForReport
+                  ? '(모든 질문 완료)'
+                  : isUnknownRetryQuestion
+                    ? '(현재 재질문은 차감 제외)'
+                    : '(현재 질문 포함)'}
               </span>
             </div>
           </div>
@@ -782,6 +853,19 @@ export default function SparScreen({
           </span>
         </div>
       </div>
+
+      {!voiceInputAvailable && (
+        <div
+          role="status"
+          className="shrink-0 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900"
+        >
+          <span className="font-semibold">
+            음성 입력 없이 텍스트로 스파링을 진행합니다.
+          </span>{' '}
+          {browserSupport.message ??
+            '현재 환경에서는 음성 입력을 사용할 수 없습니다.'}
+        </div>
+      )}
 
       <div
         ref={scrollRef}
@@ -954,59 +1038,59 @@ export default function SparScreen({
           )}
 
           <div className="flex gap-2">
-          {sttSupported && (
+            {voiceInputAvailable && (
+              <button
+                type="button"
+                data-testid="mic-btn"
+                onClick={() => void handleMicToggle()}
+                disabled={busy || !questionState}
+                title={listening ? '받아쓰기 중지' : '음성으로 답변 (STT)'}
+                className={
+                  'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border transition disabled:cursor-not-allowed disabled:opacity-40 ' +
+                  (listening
+                    ? 'border-rose-300 bg-rose-50 text-rose-500'
+                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-indigo-400 hover:text-indigo-600')
+                }
+              >
+                {listening ? (
+                  <Square className="h-4 w-4 fill-current" />
+                ) : (
+                  <Mic className="h-5 w-5" />
+                )}
+              </button>
+            )}
+
+            <textarea
+              ref={answerInputRef}
+              value={answer}
+              onChange={(event: React.ChangeEvent<HTMLTextAreaElement>) =>
+                updateAnswer(event.target.value)
+              }
+              onKeyDown={onKeyDown}
+              disabled={busy || !questionState}
+              rows={2}
+              placeholder={
+                voiceInputAvailable
+                  ? '답변을 입력하거나 마이크로 말하세요. (Enter 전송, Shift+Enter 줄바꿈)'
+                  : '답변을 입력하세요. (Enter 전송, Shift+Enter 줄바꿈)'
+              }
+              className="min-h-12 min-w-0 flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-base leading-relaxed text-slate-700 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 sm:px-4"
+            />
+
             <button
               type="button"
-              data-testid="mic-btn"
-              onClick={() => void handleMicToggle()}
-              disabled={busy || !questionState}
-              title={listening ? '받아쓰기 중지' : '음성으로 답변 (STT)'}
-              className={
-                'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border transition disabled:cursor-not-allowed disabled:opacity-40 ' +
-                (listening
-                  ? 'border-rose-300 bg-rose-50 text-rose-500'
-                  : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-indigo-400 hover:text-indigo-600')
+              onClick={() => void submit()}
+              disabled={
+                busy ||
+                !questionState ||
+                (!answer.trim() && !listening)
               }
+              aria-label="답변 전송"
+              className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-base font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 sm:px-6"
             >
-              {listening ? (
-                <Square className="h-4 w-4 fill-current" />
-              ) : (
-                <Mic className="h-5 w-5" />
-              )}
+              <Send className="h-5 w-5" />
+              <span className="hidden sm:inline">답변</span>
             </button>
-          )}
-
-          <textarea
-            ref={answerInputRef}
-            value={answer}
-            onChange={(event: React.ChangeEvent<HTMLTextAreaElement>) =>
-              updateAnswer(event.target.value)
-            }
-            onKeyDown={onKeyDown}
-            disabled={busy || !questionState}
-            rows={2}
-            placeholder={
-              sttSupported
-                ? '답변을 입력하거나 마이크로 말하세요. (Enter 전송, Shift+Enter 줄바꿈)'
-                : '답변을 입력하세요. (Enter 전송, Shift+Enter 줄바꿈)'
-            }
-            className="min-h-12 min-w-0 flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-base leading-relaxed text-slate-700 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 sm:px-4"
-          />
-
-          <button
-            type="button"
-            onClick={() => void submit()}
-            disabled={
-              busy ||
-              !questionState ||
-              (!answer.trim() && !listening)
-            }
-            aria-label="답변 전송"
-            className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-base font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 sm:px-6"
-          >
-            <Send className="h-5 w-5" />
-            <span className="hidden sm:inline">답변</span>
-          </button>
           </div>
         </div>
       )}

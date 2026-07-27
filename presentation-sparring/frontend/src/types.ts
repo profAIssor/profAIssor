@@ -11,7 +11,13 @@ export type AnswerStatus = 'answered' | 'unknown'
 export type QuestionRole = 'root' | 'followup' | 'retry'
 export type SpeechInputMode = 'speech' | 'mixed'
 export type SpeechMetricConfidence = 'high' | 'medium' | 'low'
-export type PaceStatus = 'slow' | 'balanced' | 'fast'
+export type PaceStatus =
+  | 'slow'
+  | 'slightly_slow'
+  | 'calm'
+  | 'balanced'
+  | 'slightly_fast'
+  | 'fast'
 export type VolumeVariationStatus = 'low' | 'moderate' | 'high'
 export type FillerCountMode =
   | 'recognized_minimum'
@@ -37,6 +43,11 @@ export interface Slide {
   text: string
 }
 
+export interface SpeechTermAlias {
+  canonical: string
+  aliases: string[]
+}
+
 export interface QuestionResponse {
   question: string
   question_type: QuestionType
@@ -44,6 +55,7 @@ export interface QuestionResponse {
   question_focus: string
   context_slides: number[]
   expected_answer_points: string[]
+  speech_term_aliases?: SpeechTermAlias[]
 }
 
 export interface EvaluateResponse {
@@ -58,6 +70,7 @@ export interface EvaluateResponse {
   followup_question_type: QuestionType | null
   followup_focus: string
   followup_expected_answer_points: string[]
+  followup_speech_term_aliases?: SpeechTermAlias[]
 
   supplement: string | null
   related_slides: number[]
@@ -65,6 +78,7 @@ export interface EvaluateResponse {
   retry_question_type: QuestionType | null
   retry_question_focus: string
   retry_expected_answer_points: string[]
+  retry_speech_term_aliases?: SpeechTermAlias[]
 }
 
 /** 답변 한 건에서 수집한 음성 요약 지표. */
@@ -80,25 +94,31 @@ export interface SpeechMetrics {
   /** VAD에서 실제 발화로 판정한 시간 합계. */
   voiced_duration_ms: number
 
+  /** 첫 발화부터 마지막 발화까지에서 0.25초 이상 무음 휴지를 뺀 조음 시간. */
+  articulation_duration_ms: number
+
   /** 첫 유효 발화 구간의 마이크 시작부터 첫 발화까지의 지연. */
   initial_response_latency_ms: number | null
 
   /** 용어 보정 전 final STT 기준 어절 수. */
   stt_word_count: number
 
-  /** 순수 발화 시간 기준 어절/분. */
+  /** 용어 보정 전 final STT 기준 한국어 발화 속도용 음절 수. */
+  stt_syllable_count: number
+
+  /** 조음 시간 기준 어절/분. 무음 휴지는 제외합니다. */
   pace_wpm: number | null
 
   /** 동일 마이크 구간 안의 발화 사이 멈춤 횟수. */
   internal_pause_count: number
 
-  /** 1.5초 이상 내부 멈춤 횟수. */
+  /** 4초 이상 내부 멈춤 횟수. */
   long_pause_count: number
 
   /** 가장 긴 내부 멈춤 길이. */
   longest_pause_ms: number | null
 
-  /** 발화 프레임 안에서의 상대 음량 변화 폭. */
+  /** 답변 중 목소리 크기가 오르내린 폭. */
   volume_variation_db: number | null
 
   /** Chrome STT 처리 중 final 또는 interim에서 명확히 확인된 강한 필러 최소 횟수. */
@@ -147,9 +167,12 @@ export interface TranscriptTurn {
 export interface SpeechSummary {
   measured_answer_count: number
   reliable_answer_count: number
+  pace_answer_count: number
   total_answer_count: number
+  total_captured_duration_ms: number
   total_voiced_duration_ms: number
   session_pace_wpm: number | null
+  session_pace_sps: number | null
   pace_status: PaceStatus | null
   long_pause_count: number
   longest_pause_ms: number | null

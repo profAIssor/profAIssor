@@ -16,6 +16,7 @@ export interface CapturedSpeechSegment {
 interface AnalyzedSegment {
   capturedDurationMs: number
   voicedDurationMs: number
+  articulationDurationMs: number
   initialLatencyMs: number | null
   internalPausesMs: number[]
   volumeVariationDb: number | null
@@ -26,10 +27,18 @@ interface AnalyzedSegment {
 export const SPEECH_METRIC_CONFIG = {
   frameIntervalMs: 50,
   minVoiceRunMs: 150,
+  minArticulationPauseMs: 250,
   minInternalPauseMs: 600,
-  longPauseMs: 1500,
-  minVoicedDurationForPaceMs: 4000,
-  minWordsForPace: 5,
+  longPauseMs: 4000,
+  liveSilenceTipMs: 5000,
+  initialNoiseFloorRms: 0.003,
+  minimumLiveVoiceRms: 0.006,
+  liveVoiceNoiseMultiplier: 1.8,
+  noiseFloorPreviousWeight: 0.97,
+  noiseFloorSampleWeight: 0.03,
+  minVoicedDurationForAnalysisMs: 4000,
+  minArticulationDurationForPaceMs: 5000,
+  minSyllablesForPace: 20,
   minimumDynamicRangeDb: 6,
 } as const
 
@@ -135,6 +144,7 @@ function analyzeSegment(
     return {
       capturedDurationMs,
       voicedDurationMs: 0,
+      articulationDurationMs: 0,
       initialLatencyMs: null,
       internalPausesMs: [],
       volumeVariationDb: null,
@@ -199,6 +209,7 @@ function analyzeSegment(
     return {
       capturedDurationMs,
       voicedDurationMs: 0,
+      articulationDurationMs: 0,
       initialLatencyMs: null,
       internalPausesMs: [],
       volumeVariationDb: null,
@@ -217,12 +228,13 @@ function analyzeSegment(
     }
   }
 
+  const articulationPausesMs: number[] = []
   const internalPausesMs: number[] = []
   let pauseStartIndex: number | null = null
 
   for (
     let index = firstVoicedIndex + 1;
-    index < lastVoicedIndex;
+    index <= lastVoicedIndex;
     index += 1
   ) {
     if (!voicedFrames[index] && pauseStartIndex == null) {
@@ -235,6 +247,13 @@ function analyzeSegment(
       const pauseEnd = frames[index].elapsed_ms
       const pauseDuration = Math.max(0, pauseEnd - pauseStart)
 
+      if (
+        pauseDuration >=
+        SPEECH_METRIC_CONFIG.minArticulationPauseMs
+      ) {
+        articulationPausesMs.push(Math.round(pauseDuration))
+      }
+
       if (pauseDuration >= SPEECH_METRIC_CONFIG.minInternalPauseMs) {
         internalPausesMs.push(Math.round(pauseDuration))
       }
@@ -242,6 +261,24 @@ function analyzeSegment(
       pauseStartIndex = null
     }
   }
+
+  const speechSpanEndMs = Math.min(
+    capturedDurationMs,
+    frames[lastVoicedIndex].elapsed_ms +
+      resolveFrameDuration(frames, lastVoicedIndex),
+  )
+  const speechSpanDurationMs = Math.max(
+    0,
+    speechSpanEndMs - frames[firstVoicedIndex].elapsed_ms,
+  )
+  const articulationDurationMs = Math.max(
+    0,
+    speechSpanDurationMs -
+      articulationPausesMs.reduce(
+        (sum, duration) => sum + duration,
+        0,
+      ),
+  )
 
   const voicedRmsValues = frames
     .filter((_, index) => voicedFrames[index])
@@ -264,7 +301,7 @@ function analyzeSegment(
       ? 'low'
       : continuousVoiceFallback ||
           voicedDurationMs <
-            SPEECH_METRIC_CONFIG.minVoicedDurationForPaceMs
+            SPEECH_METRIC_CONFIG.minVoicedDurationForAnalysisMs
         ? 'medium'
         : 'high'
 
@@ -272,12 +309,19 @@ function analyzeSegment(
     confidence === 'medium' &&
     !reasons.includes('유효 발화 시간이 1초 미만')
   ) {
-    reasons.push('말 빠르기 판단에 필요한 발화 시간 부족')
+    reasons.push('음성 분석에 필요한 유효 발화 시간 부족')
   }
 
   return {
     capturedDurationMs,
-    voicedDurationMs: Math.round(voicedDurationMs),
+    voicedDurationMs: Math.min(
+      capturedDurationMs,
+      Math.round(voicedDurationMs),
+    ),
+    articulationDurationMs: Math.min(
+      capturedDurationMs,
+      Math.round(articulationDurationMs),
+    ),
     initialLatencyMs: Math.round(frames[firstVoicedIndex].elapsed_ms),
     internalPausesMs,
     volumeVariationDb:
@@ -294,6 +338,22 @@ export function countSttWords(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0
 }
 
+/** 한국어 발표 속도 판정을 위한 음절 수를 계산합니다. */
+export function countSttSyllables(text: string): number {
+  const normalized = text.normalize('NFKC')
+  const hangulCount = normalized.match(/[가-힣]/g)?.length ?? 0
+  const digitCount = normalized.match(/\d/g)?.length ?? 0
+  const latinCount = (normalized.match(/[A-Za-z]+/g) ?? []).reduce(
+    (sum, token) => {
+      const vowelGroups = token.toLowerCase().match(/[aeiouy]+/g)
+      return sum + Math.max(1, vowelGroups?.length ?? 0)
+    },
+    0,
+  )
+
+  return hangulCount + latinCount + digitCount
+}
+
 /** STT 문자열에서 강한 필러의 인식 하한선 계산. */
 export function countRecognizedFillers(text: string): number {
   const matches = text.match(
@@ -301,6 +361,143 @@ export function countRecognizedFillers(text: string): number {
   )
 
   return matches?.length ?? 0
+}
+
+interface SpeechToken {
+  sourceIndex: number
+  value: string
+  normalized: string
+  isFiller: boolean
+}
+
+function tokenizeSpeechText(text: string): SpeechToken[] {
+  return text
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((value, sourceIndex) => {
+      const normalized = value
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/^[,.!?…]+|[,.!?…]+$/g, '')
+
+      return {
+        sourceIndex,
+        value,
+        normalized,
+        isFiller: /^(?:어+|음+|으+음+)$/.test(normalized),
+      }
+    })
+}
+
+/**
+ * interim에서 실제로 확인된 필러가 final 정제 과정에서 빠졌다면,
+ * 일치하는 주변 어절을 기준으로 원래 위치에 가깝게 복원합니다.
+ * 관찰되지 않은 필러는 새로 만들지 않습니다.
+ */
+export function restoreObservedFillers(
+  finalText: string,
+  observedText: string,
+): string {
+  const finalTokens = tokenizeSpeechText(finalText)
+  const observedTokens = tokenizeSpeechText(observedText)
+  const observedFillers = observedTokens.filter(
+    ({ isFiller }) => isFiller,
+  )
+
+  if (observedFillers.length === 0) return finalText
+  if (finalTokens.length === 0) return observedText.trim()
+
+  const finalFillerCount = finalTokens.filter(
+    ({ isFiller }) => isFiller,
+  ).length
+  if (finalFillerCount >= observedFillers.length) {
+    return finalText
+  }
+
+  const remainingFinalFillers = new Map<string, number>()
+  for (const token of finalTokens) {
+    if (!token.isFiller) continue
+    remainingFinalFillers.set(
+      token.normalized,
+      (remainingFinalFillers.get(token.normalized) ?? 0) + 1,
+    )
+  }
+
+  const requiredMissingCount =
+    observedFillers.length - finalFillerCount
+  const missingFillers = observedFillers
+    .filter((token) => {
+      const remaining =
+        remainingFinalFillers.get(token.normalized) ?? 0
+      if (remaining <= 0) return true
+      remainingFinalFillers.set(token.normalized, remaining - 1)
+      return false
+    })
+    .slice(0, requiredMissingCount)
+  if (missingFillers.length === 0) return finalText
+
+  const observedContentTokens = observedTokens.filter(
+    ({ isFiller, normalized }) => !isFiller && normalized,
+  )
+  const finalContentTokens = finalTokens.filter(
+    ({ isFiller, normalized }) => !isFiller && normalized,
+  )
+  const matchedFinalIndexByObservedIndex = new Map<number, number>()
+  let finalSearchIndex = 0
+
+  for (const observedToken of observedContentTokens) {
+    const matchedOffset = finalContentTokens
+      .slice(finalSearchIndex)
+      .findIndex(
+        ({ normalized }) =>
+          normalized === observedToken.normalized,
+      )
+    if (matchedOffset < 0) continue
+
+    const matchedIndex = finalSearchIndex + matchedOffset
+    matchedFinalIndexByObservedIndex.set(
+      observedToken.sourceIndex,
+      finalContentTokens[matchedIndex].sourceIndex,
+    )
+    finalSearchIndex = matchedIndex + 1
+  }
+
+  const insertions = new Map<number, string[]>()
+  for (const filler of missingFillers) {
+    const previousMatches =
+      [...matchedFinalIndexByObservedIndex].filter(
+        ([observedIndex]) => observedIndex < filler.sourceIndex,
+      )
+    const previousMatch =
+      previousMatches[previousMatches.length - 1]
+    const nextMatch = [...matchedFinalIndexByObservedIndex].find(
+      ([observedIndex]) => observedIndex > filler.sourceIndex,
+    )
+    const previousDistance = previousMatch
+      ? filler.sourceIndex - previousMatch[0]
+      : Number.POSITIVE_INFINITY
+    const nextDistance = nextMatch
+      ? nextMatch[0] - filler.sourceIndex
+      : Number.POSITIVE_INFINITY
+    const insertionIndex =
+      previousMatch && previousDistance <= nextDistance
+        ? previousMatch[1] + 1
+        : (nextMatch?.[1] ?? 0)
+    const values = insertions.get(insertionIndex) ?? []
+    values.push(filler.value)
+    insertions.set(insertionIndex, values)
+  }
+
+  const restored: string[] = []
+  for (let index = 0; index <= finalTokens.length; index += 1) {
+    restored.push(...(insertions.get(index) ?? []))
+    if (index < finalTokens.length) {
+      restored.push(finalTokens[index].value)
+    }
+  }
+
+  return restored.join(' ')
 }
 
 /** 음성 원문과 제출 답변을 이용한 혼합 입력 여부 판정. */
@@ -329,11 +526,22 @@ export function buildSpeechMetrics(
     (sum, segment) => sum + segment.capturedDurationMs,
     0,
   )
-  const voicedDurationMs = analyzed.reduce(
-    (sum, segment) => sum + segment.voicedDurationMs,
-    0,
+  const voicedDurationMs = Math.min(
+    capturedDurationMs,
+    analyzed.reduce(
+      (sum, segment) => sum + segment.voicedDurationMs,
+      0,
+    ),
+  )
+  const articulationDurationMs = Math.min(
+    capturedDurationMs,
+    analyzed.reduce(
+      (sum, segment) => sum + segment.articulationDurationMs,
+      0,
+    ),
   )
   const sttWordCount = countSttWords(rawFinalSttText)
+  const sttSyllableCount = countSttSyllables(rawFinalSttText)
   const internalPauses = analyzed.flatMap(
     (segment) => segment.internalPausesMs,
   )
@@ -372,33 +580,32 @@ export function buildSpeechMetrics(
   } else if (
     analyzed.some((segment) => segment.confidence === 'low') ||
     voicedDurationMs <
-      SPEECH_METRIC_CONFIG.minVoicedDurationForPaceMs
+      SPEECH_METRIC_CONFIG.minVoicedDurationForAnalysisMs
   ) {
     confidence = 'medium'
   }
 
   const paceWpm =
     confidence !== 'low' &&
-    voicedDurationMs >=
-      SPEECH_METRIC_CONFIG.minVoicedDurationForPaceMs &&
-    sttWordCount >= SPEECH_METRIC_CONFIG.minWordsForPace
+    articulationDurationMs >=
+      SPEECH_METRIC_CONFIG.minArticulationDurationForPaceMs &&
+    sttSyllableCount >=
+      SPEECH_METRIC_CONFIG.minSyllablesForPace
       ? Number(
           (
             sttWordCount /
-            (voicedDurationMs / 60_000)
+            (articulationDurationMs / 60_000)
           ).toFixed(1),
         )
       : null
 
+  const paceExclusionReason =
+    '20음절 또는 조음 시간 5초 미만이라 속도 판정 제외'
   if (
     paceWpm == null &&
-    !confidenceReasons.includes(
-      '말 빠르기 판단에 필요한 발화량 부족',
-    )
+    !confidenceReasons.includes(paceExclusionReason)
   ) {
-    confidenceReasons.push(
-      '말 빠르기 판단에 필요한 발화량 부족',
-    )
+    confidenceReasons.push(paceExclusionReason)
   }
 
   return {
@@ -409,9 +616,11 @@ export function buildSpeechMetrics(
     segment_count: segments.length,
     captured_duration_ms: capturedDurationMs,
     voiced_duration_ms: voicedDurationMs,
+    articulation_duration_ms: articulationDurationMs,
     initial_response_latency_ms:
       firstVoicedSegment?.initialLatencyMs ?? null,
     stt_word_count: sttWordCount,
+    stt_syllable_count: sttSyllableCount,
     pace_wpm: paceWpm,
     internal_pause_count: internalPauses.length,
     long_pause_count: internalPauses.filter(

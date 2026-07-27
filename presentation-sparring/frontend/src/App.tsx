@@ -4,6 +4,7 @@ import ReportScreen from './components/ReportScreen'
 import SetupScreen from './components/SetupScreen'
 import SparScreen from './components/SparScreen'
 import { loadSessions, saveSession } from './lib/sessionStore'
+import { WORDS_PER_MINUTE } from './lib/timing'
 import type { AcademicField, Difficulty, PersonaId, Report, Slide, Stage, TranscriptTurn } from './types'
 
 // recharts pulls in a sizable chart library — only load it when the user
@@ -61,7 +62,10 @@ export default function App() {
         field,
         personaIds,
         report: r,
-        estMinutes: r.word_count > 0 ? r.word_count / 120 : 0,
+        estMinutes:
+          r.word_count > 0
+            ? r.word_count / WORDS_PER_MINUTE
+            : 0,
       })
     } catch (e) {
       setReportError(e instanceof Error ? e.message : String(e))

@@ -2,6 +2,7 @@
 
 import logging
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Dict, List
 
@@ -17,12 +18,12 @@ from personas import (
     get_model_hint,
     get_persona,
     get_question_policy_prompt,
-    get_question_type_priority,
 )
 from schemas import (
     QuestionRequest,
     QuestionResponse,
     QuestionType,
+    SpeechTermAlias,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,146 @@ def _parse_string_list(raw, *, limit: int = 3) -> List[str]:
     return result
 
 
+def _normalize_source_text(value: str) -> str:
+    """원문 포함 여부 비교를 위한 유니코드·공백 정규화."""
+    return re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize("NFKC", value),
+    ).strip().casefold()
+
+
+def _find_source_term(source_text: str, candidate: str) -> str | None:
+    """더 긴 영문 단어의 부분 문자열을 제외하고 원문의 실제 표기를 반환합니다."""
+    normalized_source = unicodedata.normalize("NFKC", source_text)
+    normalized_candidate = re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize("NFKC", candidate),
+    ).strip()
+    if not normalized_candidate:
+        return None
+
+    candidate_pattern = re.escape(normalized_candidate).replace(
+        r"\ ",
+        r"\s+",
+    )
+    matched = re.search(
+        rf"(?<![A-Za-z0-9+#./-]){candidate_pattern}(?![A-Za-z0-9+#./-])",
+        normalized_source,
+        flags=re.IGNORECASE,
+    )
+    if not matched:
+        return None
+
+    return re.sub(r"\s+", " ", matched.group(0)).strip()
+
+
+def _parse_speech_term_aliases(
+    raw,
+    *,
+    source_text: str,
+    term_limit: int = 8,
+    alias_limit: int = 3,
+) -> List[SpeechTermAlias]:
+    """LLM 발음 후보 중 자료 원문에 근거하고 충돌하지 않는 항목만 남깁니다."""
+    if not isinstance(raw, list):
+        return []
+
+    parsed: Dict[str, dict] = {}
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        canonical_raw = item.get("canonical")
+        if not isinstance(canonical_raw, str):
+            continue
+
+        canonical_candidate = re.sub(r"\s+", " ", canonical_raw).strip()
+        canonical = _find_source_term(source_text, canonical_candidate)
+        if canonical is None:
+            continue
+        canonical_key = _normalize_source_text(canonical)
+        if (
+            len(canonical) > 120
+            or not re.search(r"[A-Za-z]", canonical)
+            or not canonical_key
+        ):
+            continue
+
+        aliases_raw = item.get("aliases")
+        if not isinstance(aliases_raw, list):
+            continue
+
+        aliases: List[str] = []
+        for alias_raw in aliases_raw:
+            if not isinstance(alias_raw, str):
+                continue
+
+            alias = re.sub(r"\s+", " ", alias_raw).strip()
+            compact_alias = alias.replace(" ", "")
+            if (
+                len(alias) > 80
+                or len(compact_alias) < 2
+                or not re.fullmatch(r"[가-힣 ]+", alias)
+                # 필러는 버리는 값이 아니라 STT 원문에 남겨야 하는 값입니다.
+                # 여기서는 기술 용어로 덮어쓰는 잘못된 별칭만 차단합니다.
+                or re.fullmatch(r"(?:어+|음+|으+음+)", compact_alias)
+                or alias in aliases
+            ):
+                continue
+
+            aliases.append(alias)
+            if len(aliases) >= alias_limit:
+                break
+
+        if not aliases:
+            continue
+
+        existing = parsed.get(canonical_key)
+        if existing:
+            for alias in aliases:
+                if (
+                    alias not in existing["aliases"]
+                    and len(existing["aliases"]) < alias_limit
+                ):
+                    existing["aliases"].append(alias)
+            continue
+
+        parsed[canonical_key] = {
+            "canonical": canonical,
+            "aliases": aliases,
+        }
+        if len(parsed) >= term_limit:
+            break
+
+    alias_owners: Dict[str, set[str]] = {}
+    for canonical_key, entry in parsed.items():
+        for alias in entry["aliases"]:
+            alias_key = _normalize_source_text(alias)
+            alias_owners.setdefault(alias_key, set()).add(canonical_key)
+
+    result: List[SpeechTermAlias] = []
+    for canonical_key, entry in parsed.items():
+        safe_aliases = [
+            alias
+            for alias in entry["aliases"]
+            if alias_owners.get(_normalize_source_text(alias))
+            == {canonical_key}
+        ]
+        if not safe_aliases:
+            continue
+        result.append(
+            SpeechTermAlias(
+                canonical=entry["canonical"],
+                aliases=safe_aliases,
+            )
+        )
+
+    return result
+
+
 _TYPE_TRANSITIONS: Dict[QuestionType, QuestionType] = {
     "definition": "application",
     "evidence": "counterexample",
@@ -148,6 +289,9 @@ _QUESTION_STOPWORDS = {
     "자료",
     "발표",
 }
+
+# 난이도는 질문의 깊이를 정하는 값이며, 이미 물은 질문을 다시 묻지 않는 기준과는 분리한다.
+_QUESTION_DUPLICATE_THRESHOLD = 0.66
 
 
 def _normalize_question_text(question: str) -> str:
@@ -238,14 +382,7 @@ def _generate_question_data(
     # 프롬프트에는 탈락 초안도 보여 주되, 실제 중복 판정은
     # 사용자가 이미 받은 질문과만 비교하여 과도한 연쇄 탈락 방지
     prompt_blocked_questions = list(historical_questions)
-    candidates: List[tuple[float, dict]] = []
     rejected_target_slides: set[int] = set()
-
-    duplicate_threshold = {
-        "easy": 0.62,
-        "medium": 0.68,
-        "hard": 0.74,
-    }.get(req.difficulty, 0.68)
 
     for attempt in range(4):
         system, user = prompts.build_question_prompt(
@@ -286,15 +423,6 @@ def _generate_question_data(
             logger.exception(
                 "LLM call failed in /api/questions"
             )
-            # 이전 시도에서 유효한 후보가 있으면 네트워크 오류 때문에
-            # 전체 질문 흐름을 중단하지 않고 가장 덜 유사한 후보 사용
-            if candidates:
-                candidates.sort(key=lambda item: item[0])
-                logger.warning(
-                    "Question generation call failed; least similar candidate used: similarity=%.3f",
-                    candidates[0][0],
-                )
-                return candidates[0][1]
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -311,8 +439,6 @@ def _generate_question_data(
             candidate,
             historical_questions,
         )
-        candidates.append((similarity, data))
-
         target_slide = data.get("targets_slide")
         if (
             isinstance(target_slide, str)
@@ -322,36 +448,11 @@ def _generate_question_data(
         if isinstance(target_slide, int):
             rejected_target_slides.add(target_slide)
 
-        if similarity < duplicate_threshold:
+        if similarity < _QUESTION_DUPLICATE_THRESHOLD:
             return data
 
         # 다음 재생성 프롬프트에만 탈락 초안 추가
         prompt_blocked_questions.append(candidate)
-
-    if candidates:
-        candidates.sort(key=lambda item: item[0])
-        best_similarity, best_data = candidates[0]
-        best_question = str(
-            best_data.get("question", "")
-        ).strip()
-
-        # 완전 동일 질문만 아니면 502 대신 가장 덜 유사한 후보로 계속 진행
-        if (
-            best_question
-            and best_similarity < 0.96
-            and not any(
-                _normalize_question_text(best_question)
-                == _normalize_question_text(previous)
-                for previous in historical_questions
-            )
-        ):
-            logger.warning(
-                "Strict duplicate threshold not met; least similar candidate used: difficulty=%s similarity=%.3f question=%s",
-                req.difficulty,
-                best_similarity,
-                best_question[:160],
-            )
-            return best_data
 
     raise HTTPException(
         status_code=502,
@@ -373,7 +474,12 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
         )
         + SOURCE_TERM_PRESERVATION
     )
-    question_type_priority = list(get_question_type_priority(req.persona_id))
+    question_type_priority = list(
+        get_allowed_question_types(
+            req.persona_id,
+            req.difficulty,
+        )
+    )
     data = _generate_question_data(
         req,
         persona_system=persona_system,
@@ -421,6 +527,20 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
         )
 
     question_focus = str(data.get("question_focus", "")).strip()
+    context_source = "\n".join(
+        [
+            question,
+            *[
+                slide.text
+                for slide in req.slides
+                if slide.index in context_slides
+            ],
+        ]
+    )
+    speech_term_aliases = _parse_speech_term_aliases(
+        data.get("speech_term_aliases"),
+        source_text=context_source,
+    )
 
     return QuestionResponse(
         question=question,
@@ -429,5 +549,6 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
         question_focus=question_focus or question[:160],
         context_slides=context_slides,
         expected_answer_points=expected_answer_points,
+        speech_term_aliases=speech_term_aliases,
     )
 

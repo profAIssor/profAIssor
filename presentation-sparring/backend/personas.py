@@ -7,6 +7,16 @@ QuestionTypePriority = Tuple[str, ...]
 QuestionTypePolicy = Dict[str, QuestionTypePriority]
 
 
+_DIFFICULTY_QUESTION_TYPES: Dict[str, QuestionTypePriority] = {
+    # 이해 확인에는 자료에 직접 드러난 의미와 근거만 사용한다.
+    "easy": ("definition", "evidence"),
+    # 설명 검증은 개념·근거의 연결과 자료 안의 적용까지 허용한다.
+    "medium": ("definition", "evidence", "application"),
+    # 실제 적용 검토는 예외·한계까지 포함해 모든 질문 유형을 사용할 수 있다.
+    "hard": ("definition", "evidence", "application", "counterexample"),
+}
+
+
 PERSONAS: Dict[str, dict] = {
     "standard": {
         "name": "기본 발표 평가자",
@@ -50,7 +60,7 @@ PERSONAS: Dict[str, dict] = {
             "핵심 개념을 실제로 이해했는지 검증하세요. "
             "프로젝트·연구 자료에서는 주장과 근거, 방법과 결과, 결과와 해석의 연결을 보고, "
             "개념 설명·교재형 자료에서는 정의, 개념 간 구분, 사용 조건과 예시의 연결을 보세요. "
-            "근거 요구형과 정의 확인형을 우선하고, 보통 이상 난이도에서는 "
+            "근거 요구형과 정의 확인형을 우선하고, 어려움 난이도에서는 "
             "반례 제시형으로 주장 범위와 성립 조건을 검증할 수 있습니다. "
             "확장 적용형은 자료의 핵심 논리와 직접 연결될 때만 사용하세요. "
             "한 슬라이드의 문장만 떼어 묻지 말고, 관련된 앞뒤 슬라이드가 있다면 "
@@ -176,19 +186,22 @@ def get_allowed_question_types(
     difficulty: str,
 ) -> QuestionTypePriority:
     """난이도별 사용 가능한 질문 유형 반환."""
-    policy = get_question_type_policy(persona_id)
-
-    if difficulty == "hard":
-        return (
-            *policy["primary"],
-            *policy["secondary"],
-            *policy["limited"],
-        )
-
-    return (
-        *policy["primary"],
-        *policy["secondary"],
+    allowed_by_difficulty = _DIFFICULTY_QUESTION_TYPES.get(
+        difficulty,
+        _DIFFICULTY_QUESTION_TYPES["medium"],
     )
+    persona_priority = get_question_type_priority(persona_id)
+    ordered = [
+        question_type
+        for question_type in persona_priority
+        if question_type in allowed_by_difficulty
+    ]
+    ordered.extend(
+        question_type
+        for question_type in allowed_by_difficulty
+        if question_type not in ordered
+    )
+    return tuple(ordered)
 
 
 def get_question_policy_prompt(
@@ -203,26 +216,26 @@ def get_question_policy_prompt(
 
     if difficulty == "easy":
         difficulty_rule = (
-            "주요 질문 유형을 우선하고 보조 질문 유형은 이전 질문과의 반복을 "
-            "피할 때만 사용하세요. 제한 질문 유형은 사용하지 마세요. "
+            "정의 확인형과 근거 요구형만 사용해 발표 자료의 핵심 의미·흐름·역할을 확인하세요. "
             "이전 질문이 있다면 같은 용어를 다른 말로 되묻지 말고, 자료 전체에서 "
             "다른 핵심 개념·다른 절차 단계·다른 비교 지점을 선택하세요. "
-            "질문 하나는 자료에 직접 적힌 정보만으로 1~2문장 안에 답할 수 있어야 합니다."
+            "질문 하나는 자료에 직접 적힌 정보만으로 1~2문장 안에 답할 수 있어야 하며, "
+            "실제 환경 적용·한계·실패 조건을 요구하지 마세요."
         )
     elif difficulty == "hard":
         difficulty_rule = (
-            "주요·보조 질문 유형을 우선하되, 제한 질문 유형도 자료 전체의 논리를 "
-            "깊게 검증하는 데 꼭 필요한 경우 사용할 수 있습니다. "
-            "한 슬라이드의 세부 문구에 머무르지 말고 서로 다른 2~3개 슬라이드의 "
-            "전제와 결과, 조건과 적용, 주장과 한계를 연결하세요. "
+            "모든 질문 유형을 사용할 수 있지만, 실제 적용의 조건·환경 차이·한계·실패 조건 중 "
+            "하나를 검토하는 질문을 우선하세요. 한 슬라이드의 세부 문구에 머무르지 말고 서로 다른 "
+            "2~3개 슬라이드의 전제와 결과, 조건과 적용, 주장과 한계를 연결하세요. "
             "외부 최신 사실을 사실처럼 추가하지 말고, 자료에 없는 확장은 반드시 "
             "가정형 조건으로 표현하세요."
         )
     else:
         difficulty_rule = (
-            "주요 질문 유형을 우선하고, 같은 유형이나 같은 핵심 개념이 반복될 때 "
-            "보조 질문 유형으로 전환하세요. 제한 질문 유형은 사용하지 마세요. "
-            "관련 슬라이드 1~3개를 연결하되 추론은 한 단계로 제한하세요."
+            "정의 확인형·근거 요구형·확장 적용형을 사용해 발표의 주장과 근거, 개념 사이의 관계, "
+            "선택한 방법의 이유 중 하나를 검증하세요. 같은 유형이나 같은 핵심 개념이 반복되면 "
+            "다른 유형으로 전환하세요. 관련 슬라이드 1~3개를 연결하되 추론은 한 단계로 제한하고, "
+            "실제 환경의 실패 조건이나 여러 통제 변수를 한꺼번에 요구하지 마세요."
         )
 
     return (
