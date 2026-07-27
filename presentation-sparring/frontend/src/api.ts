@@ -18,7 +18,20 @@ const BASE =
     | string
     | undefined) ?? 'http://localhost:8000'
 
-const REQUEST_TIMEOUT_MS = 15_000
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const PERSONA_REQUEST_TIMEOUT_MS = 15_000
+const SLIDE_EXTRACTION_TIMEOUT_MS = 60_000
+
+// 백엔드의 LLM 호출 제한(60초)에 후처리 여유를 더한 단일 호출 예산.
+// 질문은 중복 회피로 최대 4회, 평가와 리포트는 보완 생성으로
+// 최대 2회의 순차 LLM 호출이 가능하므로 엔드포인트별로 다르게 기다린다.
+const LLM_CALL_BUDGET_MS = 75_000
+const QUESTION_REQUEST_TIMEOUT_MS =
+  LLM_CALL_BUDGET_MS * 4
+const EVALUATE_REQUEST_TIMEOUT_MS =
+  LLM_CALL_BUDGET_MS * 2
+const REPORT_REQUEST_TIMEOUT_MS =
+  LLM_CALL_BUDGET_MS * 2
 const RETRY_DELAY_MS = 600
 const RETRYABLE_STATUS_CODES = new Set([
   429,
@@ -126,14 +139,25 @@ function resolveErrorMessage(
 async function request<T>(
   path: string,
   init: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   let lastError: Error | null = null
+  const method = (init.method ?? 'GET').toUpperCase()
+  // 질문·평가·리포트 POST는 서버가 이미 처리했는지 알 수 없으므로
+  // 자동 재시도하지 않는다. 안전한 GET 요청만 한 번 재시도한다.
+  const maxAttempts = method === 'GET' ? 2 : 1
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < maxAttempts;
+    attempt += 1
+  ) {
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => {
       controller.abort()
-    }, REQUEST_TIMEOUT_MS)
+    }, timeoutMs)
+    const hasRetryAttempt =
+      attempt + 1 < maxAttempts
 
     try {
       const response = await fetch(
@@ -149,7 +173,7 @@ async function request<T>(
         const retryable =
           RETRYABLE_STATUS_CODES.has(response.status)
 
-        if (retryable && attempt === 0) {
+        if (retryable && hasRetryAttempt) {
           await wait(RETRY_DELAY_MS)
           continue
         }
@@ -183,7 +207,7 @@ async function request<T>(
         lastError = new Error(
           '서버에 연결할 수 없습니다. 네트워크 상태와 서버 실행 여부를 확인해 주세요.',
         )
-        if (attempt === 0) {
+        if (hasRetryAttempt) {
           await wait(RETRY_DELAY_MS)
           continue
         }
@@ -194,7 +218,7 @@ async function request<T>(
         lastError = exception
         if (
           exception.retryable &&
-          attempt === 0
+          hasRetryAttempt
         ) {
           await wait(RETRY_DELAY_MS)
           continue
@@ -221,21 +245,30 @@ async function request<T>(
 async function post<T>(
   path: string,
   body: unknown,
+  timeoutMs: number,
 ): Promise<T> {
-  return request<T>(path, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
+  return request<T>(
+    path,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  })
+    timeoutMs,
+  )
 }
 
 /** 백엔드 단일 원본의 공개 페르소나 목록 조회. */
 export function fetchPersonas(): Promise<Persona[]> {
-  return request<Persona[]>('/api/personas', {
-    method: 'GET',
-  })
+  return request<Persona[]>(
+    '/api/personas',
+    {
+      method: 'GET',
+    },
+    PERSONA_REQUEST_TIMEOUT_MS,
+  )
 }
 
 
@@ -252,6 +285,7 @@ export async function extractSlides(
       method: 'POST',
       body: formData,
     },
+    SLIDE_EXTRACTION_TIMEOUT_MS,
   )
   return data.slides
 }
@@ -265,14 +299,18 @@ export function fetchQuestion(
   field: AcademicField | null,
   excludedQuestions: string[] = [],
 ): Promise<QuestionResponse> {
-  return post('/api/questions', {
-    script,
-    slides,
-    persona_id: personaId,
-    difficulty,
-    field,
-    excluded_questions: excludedQuestions,
-  })
+  return post(
+    '/api/questions',
+    {
+      script,
+      slides,
+      persona_id: personaId,
+      difficulty,
+      field,
+      excluded_questions: excludedQuestions,
+    },
+    QUESTION_REQUEST_TIMEOUT_MS,
+  )
 }
 
 /** 현재 질문 답변 평가 및 다음 질문 동작 결정 요청. */
@@ -295,28 +333,32 @@ export function evaluateAnswer(args: {
   field: AcademicField | null
   termHints?: string[]
 }): Promise<EvaluateResponse> {
-  return post('/api/evaluate', {
-    script: args.script,
-    slides: args.slides,
-    persona_id: args.personaId,
-    root_question: args.rootQuestion,
-    root_question_type: args.rootQuestionType,
-    question: args.question,
-    question_type: args.questionType,
-    question_role: args.questionRole,
-    question_focus: args.questionFocus,
-    context_slides: args.contextSlides,
-    expected_answer_points:
-      args.expectedAnswerPoints,
-    answer: args.answer,
-    turn: args.turn,
-    max_turns: args.maxTurns,
-    difficulty: args.difficulty,
-    field: args.field,
-    term_hints: args.termHints ?? [],
-    is_unknown_retry:
-      args.questionRole === 'retry',
-  })
+  return post(
+    '/api/evaluate',
+    {
+      script: args.script,
+      slides: args.slides,
+      persona_id: args.personaId,
+      root_question: args.rootQuestion,
+      root_question_type: args.rootQuestionType,
+      question: args.question,
+      question_type: args.questionType,
+      question_role: args.questionRole,
+      question_focus: args.questionFocus,
+      context_slides: args.contextSlides,
+      expected_answer_points:
+        args.expectedAnswerPoints,
+      answer: args.answer,
+      turn: args.turn,
+      max_turns: args.maxTurns,
+      difficulty: args.difficulty,
+      field: args.field,
+      term_hints: args.termHints ?? [],
+      is_unknown_retry:
+        args.questionRole === 'retry',
+    },
+    EVALUATE_REQUEST_TIMEOUT_MS,
+  )
 }
 
 /** 전체 질의응답 기록 기반 최종 리포트 요청. */
@@ -326,10 +368,14 @@ export function fetchReport(
   transcript: TranscriptTurn[],
   field: AcademicField | null,
 ): Promise<Report> {
-  return post('/api/report', {
-    script,
-    slides,
-    transcript,
-    field,
-  })
+  return post(
+    '/api/report',
+    {
+      script,
+      slides,
+      transcript,
+      field,
+    },
+    REPORT_REQUEST_TIMEOUT_MS,
+  )
 }

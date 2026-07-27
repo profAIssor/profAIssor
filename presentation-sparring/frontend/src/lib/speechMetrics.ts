@@ -303,6 +303,143 @@ export function countRecognizedFillers(text: string): number {
   return matches?.length ?? 0
 }
 
+interface SpeechToken {
+  sourceIndex: number
+  value: string
+  normalized: string
+  isFiller: boolean
+}
+
+function tokenizeSpeechText(text: string): SpeechToken[] {
+  return text
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((value, sourceIndex) => {
+      const normalized = value
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/^[,.!?…]+|[,.!?…]+$/g, '')
+
+      return {
+        sourceIndex,
+        value,
+        normalized,
+        isFiller: /^(?:어+|음+|으+음+)$/.test(normalized),
+      }
+    })
+}
+
+/**
+ * interim에서 실제로 확인된 필러가 final 정제 과정에서 빠졌다면,
+ * 일치하는 주변 어절을 기준으로 원래 위치에 가깝게 복원합니다.
+ * 관찰되지 않은 필러는 새로 만들지 않습니다.
+ */
+export function restoreObservedFillers(
+  finalText: string,
+  observedText: string,
+): string {
+  const finalTokens = tokenizeSpeechText(finalText)
+  const observedTokens = tokenizeSpeechText(observedText)
+  const observedFillers = observedTokens.filter(
+    ({ isFiller }) => isFiller,
+  )
+
+  if (observedFillers.length === 0) return finalText
+  if (finalTokens.length === 0) return observedText.trim()
+
+  const finalFillerCount = finalTokens.filter(
+    ({ isFiller }) => isFiller,
+  ).length
+  if (finalFillerCount >= observedFillers.length) {
+    return finalText
+  }
+
+  const remainingFinalFillers = new Map<string, number>()
+  for (const token of finalTokens) {
+    if (!token.isFiller) continue
+    remainingFinalFillers.set(
+      token.normalized,
+      (remainingFinalFillers.get(token.normalized) ?? 0) + 1,
+    )
+  }
+
+  const requiredMissingCount =
+    observedFillers.length - finalFillerCount
+  const missingFillers = observedFillers
+    .filter((token) => {
+      const remaining =
+        remainingFinalFillers.get(token.normalized) ?? 0
+      if (remaining <= 0) return true
+      remainingFinalFillers.set(token.normalized, remaining - 1)
+      return false
+    })
+    .slice(0, requiredMissingCount)
+  if (missingFillers.length === 0) return finalText
+
+  const observedContentTokens = observedTokens.filter(
+    ({ isFiller, normalized }) => !isFiller && normalized,
+  )
+  const finalContentTokens = finalTokens.filter(
+    ({ isFiller, normalized }) => !isFiller && normalized,
+  )
+  const matchedFinalIndexByObservedIndex = new Map<number, number>()
+  let finalSearchIndex = 0
+
+  for (const observedToken of observedContentTokens) {
+    const matchedOffset = finalContentTokens
+      .slice(finalSearchIndex)
+      .findIndex(
+        ({ normalized }) =>
+          normalized === observedToken.normalized,
+      )
+    if (matchedOffset < 0) continue
+
+    const matchedIndex = finalSearchIndex + matchedOffset
+    matchedFinalIndexByObservedIndex.set(
+      observedToken.sourceIndex,
+      finalContentTokens[matchedIndex].sourceIndex,
+    )
+    finalSearchIndex = matchedIndex + 1
+  }
+
+  const insertions = new Map<number, string[]>()
+  for (const filler of missingFillers) {
+    const previousMatches =
+      [...matchedFinalIndexByObservedIndex].filter(
+        ([observedIndex]) => observedIndex < filler.sourceIndex,
+      )
+    const previousMatch =
+      previousMatches[previousMatches.length - 1]
+    const nextMatch = [...matchedFinalIndexByObservedIndex].find(
+      ([observedIndex]) => observedIndex > filler.sourceIndex,
+    )
+    const previousDistance = previousMatch
+      ? filler.sourceIndex - previousMatch[0]
+      : Number.POSITIVE_INFINITY
+    const nextDistance = nextMatch
+      ? nextMatch[0] - filler.sourceIndex
+      : Number.POSITIVE_INFINITY
+    const insertionIndex =
+      previousMatch && previousDistance <= nextDistance
+        ? previousMatch[1] + 1
+        : (nextMatch?.[1] ?? 0)
+    const values = insertions.get(insertionIndex) ?? []
+    values.push(filler.value)
+    insertions.set(insertionIndex, values)
+  }
+
+  const restored: string[] = []
+  for (let index = 0; index <= finalTokens.length; index += 1) {
+    restored.push(...(insertions.get(index) ?? []))
+    if (index < finalTokens.length) {
+      restored.push(finalTokens[index].value)
+    }
+  }
+
+  return restored.join(' ')
+}
+
 /** 음성 원문과 제출 답변을 이용한 혼합 입력 여부 판정. */
 function resolveInputMode(
   sttWordCount: number,

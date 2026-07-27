@@ -48,6 +48,65 @@ def _parse_rubric(raw) -> Dict[str, str]:
     }
 
 
+def _parse_expected_point_assessments(
+    raw,
+    expected_answer_points: List[str],
+    answer: str,
+) -> Dict[int, bool]:
+    """모델의 요소별 의미 판정을 검증해 후속 질문 선택에만 사용합니다."""
+    if not isinstance(raw, list) or not expected_answer_points:
+        return {}
+
+    normalized_answer = re.sub(r"\s+", " ", answer).strip().casefold()
+    parsed: Dict[int, bool] = {}
+    conflicted_indices: set[int] = set()
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        point_index = item.get("point_index")
+        if isinstance(point_index, str) and point_index.strip().isdigit():
+            point_index = int(point_index.strip())
+
+        covered = item.get("covered")
+        evidence = item.get("answer_evidence")
+        if (
+            isinstance(point_index, bool)
+            or not isinstance(point_index, int)
+            or point_index < 0
+            or point_index >= len(expected_answer_points)
+            or not isinstance(covered, bool)
+            or not isinstance(evidence, str)
+            or point_index in conflicted_indices
+        ):
+            continue
+
+        normalized_evidence = re.sub(
+            r"\s+",
+            " ",
+            evidence,
+        ).strip().casefold()
+        if covered and (
+            not normalized_evidence
+            or normalized_evidence not in normalized_answer
+        ):
+            # covered 판정은 학생 답변의 실제 원문 근거가 있을 때만 신뢰합니다.
+            continue
+        if not covered and normalized_evidence:
+            # 미충족 요소는 근거를 비우도록 한 출력 계약과 모순되므로 신뢰하지 않습니다.
+            continue
+
+        if point_index in parsed and parsed[point_index] != covered:
+            parsed.pop(point_index, None)
+            conflicted_indices.add(point_index)
+            continue
+
+        parsed[point_index] = covered
+
+    return parsed
+
+
 def _rubric_counts(rubric: Dict[str, str]) -> Dict[str, int]:
     """평가 등급별 축 개수 집계."""
     return {
@@ -511,19 +570,6 @@ def _focus_tokens(text: str) -> set[str]:
     }
 
 
-def _answer_covers_point(
-    answer: str,
-    point: str,
-) -> float:
-    """학생 답변의 기대 요소 포함 비율 계산."""
-    point_tokens = _focus_tokens(point)
-    if not point_tokens:
-        return 0.0
-
-    answer_tokens = _focus_tokens(answer)
-    return len(point_tokens & answer_tokens) / len(point_tokens)
-
-
 def _gap_point_score(
     raw_gap: str,
     point: str,
@@ -576,31 +622,266 @@ def _clean_single_focus(text: str) -> str:
     return selected[:100].strip(" .,:;-")
 
 
+def _gap_repeats_covered_expected_point(
+    req: EvaluateRequest,
+    raw_gap: str,
+    point_assessments: Dict[int, bool],
+) -> bool:
+    """이미 충족된 요소를 보완점이 다시 누락으로 지목했는지 확인합니다."""
+    assessed_indices = [
+        index
+        for index, point in enumerate(req.expected_answer_points)
+        if point.strip()
+    ][:3]
+    # 모델이 프롬프트에 제시된 요소를 모두 판정한 경우에만
+    # 잘못된 gaps를 무시합니다. 일부 판정만으로 실제 누락을 숨기지 않습니다.
+    if (
+        not assessed_indices
+        or any(
+            point_assessments.get(index) is not True
+            for index in assessed_indices
+        )
+    ):
+        return False
+
+    return _gap_targets_covered_expected_point(
+        req,
+        raw_gap,
+        point_assessments,
+    )
+
+
+_MISSING_CLAIM_MARKERS = (
+    "누락",
+    "빠졌",
+    "빠져",
+    "언급하지",
+    "말하지",
+    "포함하지",
+    "제시하지",
+    "답하지",
+)
+_SUPPORT_GAP_MARKERS = (
+    "근거",
+    "이유",
+    "왜",
+    "논리",
+    "연결",
+    "과정",
+    "메커니즘",
+    "수치",
+    "예시",
+)
+
+
+def _gap_targets_covered_expected_point(
+    req: EvaluateRequest,
+    raw_gap: str,
+    point_assessments: Dict[int, bool],
+) -> bool:
+    """보완점이 설명 깊이가 아니라 이미 말한 명제의 누락을 주장하는지 판정합니다."""
+    normalized_gap = re.sub(r"\s+", " ", raw_gap).strip()
+    if (
+        not normalized_gap
+        or not any(
+            marker in normalized_gap
+            for marker in _MISSING_CLAIM_MARKERS
+        )
+        or any(
+            marker in normalized_gap
+            for marker in _SUPPORT_GAP_MARKERS
+        )
+    ):
+        return False
+
+    gap_focus = _extract_gap_focus(raw_gap)
+    if not gap_focus:
+        return False
+
+    covered_score = max(
+        (
+            _gap_point_score(gap_focus, point)
+            for index, point in enumerate(req.expected_answer_points)
+            if point.strip()
+            and point_assessments.get(index) is True
+        ),
+        default=0.0,
+    )
+    uncovered_score = max(
+        (
+            _gap_point_score(gap_focus, point)
+            for index, point in enumerate(req.expected_answer_points)
+            if point.strip()
+            and point_assessments.get(index) is False
+        ),
+        default=0.0,
+    )
+    return (
+        covered_score >= 0.5
+        and covered_score > uncovered_score
+    )
+
+
+def _normalize_semantic_consistency(
+    req: EvaluateRequest,
+    evaluation_data: dict,
+) -> dict:
+    """요소별 의미 판정과 정반대인 '누락' 피드백만 보수적으로 교정합니다."""
+    point_assessments = _parse_expected_point_assessments(
+        evaluation_data.get("expected_point_assessments"),
+        req.expected_answer_points,
+        req.answer,
+    )
+    raw_gap = str(evaluation_data.get("gaps", "")).strip()
+    if not _gap_targets_covered_expected_point(
+        req,
+        raw_gap,
+        point_assessments,
+    ):
+        return evaluation_data
+
+    displayed_indices = [
+        index
+        for index, point in enumerate(req.expected_answer_points)
+        if point.strip()
+    ][:3]
+    if not displayed_indices or any(
+        index not in point_assessments
+        for index in displayed_indices
+    ):
+        return evaluation_data
+
+    normalized = dict(evaluation_data)
+    uncovered_indices = [
+        index
+        for index in displayed_indices
+        if point_assessments.get(index) is False
+    ]
+    verdict = str(normalized.get("verdict", "")).strip()
+
+    if uncovered_indices and verdict == "충분":
+        # 모델이 해당 요소를 선택 사항으로 보고 충분 판정을 유지했다면
+        # covered 요소를 누락이라 한 문장만 제거합니다.
+        normalized["gaps"] = "없음"
+        return normalized
+
+    if uncovered_indices:
+        missing_point = _clean_single_focus(
+            req.expected_answer_points[uncovered_indices[0]]
+        )
+        normalized["verdict"] = "부분 충족"
+        normalized["gaps"] = (
+            f"다음 핵심 요소를 더 분명히 설명해 주세요: {missing_point}"
+            if missing_point
+            else "질문의 남은 핵심 요소 한 가지를 더 분명히 설명해 주세요."
+        )
+        if not str(normalized.get("strengths", "")).strip():
+            normalized["strengths"] = (
+                "질문의 일부 핵심 요소를 자신의 말로 설명했습니다."
+            )
+        rubric = _parse_rubric(normalized.get("rubric"))
+        if rubric.get("직접성") == "부족":
+            rubric["직접성"] = "보통"
+        normalized["rubric"] = rubric
+        return normalized
+
+    # 모든 제시 요소가 실제 답변 원문 근거와 함께 covered일 때만
+    # 모순된 누락 피드백을 충분/없음으로 정규화합니다.
+    normalized["verdict"] = "충분"
+    normalized["gaps"] = "없음"
+    if not str(normalized.get("strengths", "")).strip():
+        normalized["strengths"] = (
+            "질문의 핵심 요소를 자신의 말로 설명했습니다."
+        )
+    rubric = _parse_rubric(normalized.get("rubric"))
+    for axis in _RUBRIC_AXES:
+        if rubric.get(axis) in {None, "부족"}:
+            rubric[axis] = "보통"
+    normalized["rubric"] = rubric
+    return normalized
+
+
+_LOGIC_GAP_MARKERS = (
+    "모순",
+    "앞뒤",
+    "논리",
+    "연결되지",
+    "연결이 부족",
+    "인과가",
+)
+
+
+def _normalize_rubric_consistency(
+    req: EvaluateRequest,
+    evaluation_data: dict,
+) -> dict:
+    """판정·강점과 모순되는 전 축 부족 루브릭을 최소 범위로 정규화합니다."""
+    verdict = str(evaluation_data.get("verdict", "")).strip()
+    if verdict not in {"충분", "부분 충족"}:
+        return evaluation_data
+
+    normalized = dict(evaluation_data)
+    rubric = _parse_rubric(normalized.get("rubric"))
+
+    if verdict == "충분":
+        for axis in _RUBRIC_AXES:
+            if rubric.get(axis) in {None, "부족"}:
+                rubric[axis] = "보통"
+        normalized["rubric"] = rubric
+        return normalized
+
+    if rubric.get("직접성") in {None, "부족"}:
+        rubric["직접성"] = "보통"
+
+    gaps = str(normalized.get("gaps", "")).strip()
+    strengths = str(normalized.get("strengths", "")).strip()
+    if (
+        strengths
+        and not any(
+            marker in gaps
+            for marker in _LOGIC_GAP_MARKERS
+        )
+        and rubric.get("논리") in {None, "부족"}
+    ):
+        rubric["논리"] = "보통"
+
+    current_type = req.question_type or req.root_question_type
+    if (
+        current_type != "evidence"
+        and rubric.get("근거") in {None, "부족"}
+    ):
+        rubric["근거"] = "보통"
+
+    normalized["rubric"] = rubric
+    return normalized
+
+
 def _select_single_followup_focus(
     req: EvaluateRequest,
     raw_gap: str,
+    point_assessments: Dict[int, bool] | None = None,
 ) -> str:
     """학생 답변에서 누락된 기대 요소 한 가지 선택."""
-    expected_candidates = [
-        _clean_single_focus(point)
-        for point in req.expected_answer_points
-        if _clean_single_focus(point)
-    ]
+    assessments = point_assessments or {}
+    expected_candidates: List[tuple[int, str]] = []
+    for index, point in enumerate(req.expected_answer_points):
+        cleaned = _clean_single_focus(point)
+        if cleaned and assessments.get(index) is not True:
+            expected_candidates.append((index, cleaned))
 
     if expected_candidates:
         ranked = sorted(
             expected_candidates,
-            key=lambda point: (
-                _gap_point_score(raw_gap, point),
-                1.0 - _answer_covers_point(req.answer, point),
-                len(_focus_tokens(point)),
+            key=lambda candidate: (
+                _gap_point_score(raw_gap, candidate[1]),
+                assessments.get(candidate[0]) is False,
             ),
             reverse=True,
         )
-        best = ranked[0]
+        best_index, best = ranked[0]
         if (
             _gap_point_score(raw_gap, best) > 0
-            or _answer_covers_point(req.answer, best) < 0.5
+            or assessments.get(best_index) is False
         ):
             return best
 
@@ -837,13 +1118,31 @@ def _build_followup(
     """답변의 가장 중요한 보완점을 우선 확인하는 꼬리질문 생성."""
     current_type = req.question_type or req.root_question_type or "definition"
     raw_gap = str(evaluation_data.get("gaps", "")).strip()
-    gap_focus = (
-        _select_single_followup_focus(req, raw_gap)
-        if req.difficulty == "medium"
-        else _extract_gap_focus(raw_gap)
+    point_assessments = _parse_expected_point_assessments(
+        evaluation_data.get("expected_point_assessments"),
+        req.expected_answer_points,
+        req.answer,
     )
+    has_meaningful_gap = (
+        _has_meaningful_gap(raw_gap)
+        and not _gap_repeats_covered_expected_point(
+            req,
+            raw_gap,
+            point_assessments,
+        )
+    )
+    if not has_meaningful_gap:
+        gap_focus = ""
+    elif req.difficulty == "medium":
+        gap_focus = _select_single_followup_focus(
+            req,
+            raw_gap,
+            point_assessments,
+        )
+    else:
+        gap_focus = _extract_gap_focus(raw_gap)
 
-    if _has_meaningful_gap(raw_gap):
+    if has_meaningful_gap:
         (
             fallback_question,
             fallback_type,
@@ -924,11 +1223,12 @@ def _build_followup(
         'JSON만 반환: {"followup":"<꼬리질문>","followup_question_type":"<evidence|counterexample|application|definition>",'
         '"followup_focus":"<평가 초점>","followup_expected_answer_points":["<요소1>","<요소2>"]}. '
     )
-    gap_context = (
-        "(보통 난이도에서는 선택된 단일 보완점만 사용)"
-        if req.difficulty == "medium"
-        else raw_gap
-    )
+    if not has_meaningful_gap:
+        gap_context = "(구체 보완점 없음)"
+    elif req.difficulty == "medium":
+        gap_context = "(보통 난이도에서는 선택된 단일 보완점만 사용)"
+    else:
+        gap_context = raw_gap
     user = (
         f"[기본 질문]\n{req.question}\n\n"
         f"[학생 답변]\n{req.answer}\n\n"
@@ -1080,6 +1380,8 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
             return _build_unknown_closure(req)
         return _build_unknown_retry(req)
 
+    data = _normalize_semantic_consistency(req, data)
+    data = _normalize_rubric_consistency(req, data)
     response_kwargs = dict(
         answer_status="answered",
         verdict=str(data.get("verdict", "")).strip(),

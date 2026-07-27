@@ -83,6 +83,31 @@ expected_answer_points는 질문 문장이 직접 요구한 답만 포함해야 
 """
 
 
+_SEMANTIC_EQUIVALENCE_GUIDE = """
+[의미 동등성 판정 절차]
+
+일반 평가를 작성하기 전에 기대 답변 요소별로 다음 절차를 반드시 수행하세요.
+
+1. 각 expected_answer_point를 정답 문구가 아니라 독립된 원자 명제로 해석하세요.
+2. 학생 답변에서 그 명제를 직접 말했거나 문맥상 필연적으로 함의하는 짧은 원문 구절을 찾으세요.
+3. 동의어, 바꿔 말하기, 능동·수동 전환뿐 아니라 구체적인 작동 방식이나 사례가 상위 개념을
+   명백히 함의하는 경우도 충족으로 인정하세요. 상위 개념의 문구를 그대로 반복하도록 요구하지 마세요.
+4. 같은 단어가 등장했다는 이유만으로는 충족이 아닙니다. 답변의 실제 명제가 기대 요소와
+   논리적으로 같은 내용인지 확인하세요.
+5. 의미상 충족된 요소는 gaps에 누락으로 적거나 그 요소를 다시 묻는 꼬리질문을 만들지 마세요.
+   근거 구절을 찾을 수 없는 요소만 미충족으로 판단하세요.
+
+예를 들어 기대 요소가 "전체 토큰 쌍 대신 일부 토큰 관계만 계산한다"이고 학생이
+"인접한 토큰끼리만 상호작용해 주변 K개의 토큰만 계산한다"고 답했다면,
+국소적인 계산 방식이 일부 관계만 선택한다는 상위 개념을 필연적으로 함의하므로 충족입니다.
+
+학생 답변은 음성 인식(STT) 전사일 수 있습니다. 평가 전에 질문, 관련 슬라이드, 용어 참고를 이용해
+조사·어미·띄어쓰기와 문맥상 명백한 음성 오인식을 내부적으로 복원하세요.
+예를 들어 문맥이 뒷받침하면 "주변 케익의 토큰"을 "주변 K개의 토큰"으로 해석할 수 있습니다.
+다만 문맥으로 확정할 수 없는 누락된 주장이나 근거를 새로 만들어 답변에 보태지는 마세요.
+"""
+
+
 _DIFFICULTY_HINTS = {
     "easy": (
         "[난이도: 쉬움]\n"
@@ -285,18 +310,18 @@ def _format_excluded_questions(excluded_questions: List[str] | None) -> str:
 
 def _format_expected_points(expected_answer_points: List[str] | None) -> str:
     """최초 질문의 내부 채점 기준을 읽기 쉬운 목록으로 변환합니다."""
-    points = [
-        point.strip()
-        for point in (expected_answer_points or [])
+    indexed_points = [
+        (index, point.strip())
+        for index, point in enumerate(expected_answer_points or [])
         if isinstance(point, str) and point.strip()
     ]
 
-    if not points:
+    if not indexed_points:
         return "(명시된 기대 답변 요소 없음 — 질문과 관련 슬라이드에서 판단)"
 
     return "\n".join(
-        f"- {point}"
-        for point in points[:3]
+        f"- [{index}] {point}"
+        for index, point in indexed_points[:3]
     )
 
 
@@ -482,6 +507,10 @@ def build_evaluate_prompt(
             "직접성은 질문의 핵심에 바로 답했는지, 근거는 질문에서 근거나 설명을 요구한 경우 "
             "그 수준을 충족했는지, 논리는 답변 내부의 설명이 모순 없이 연결되는지를 뜻합니다. "
             "질문이 근거를 요구하지 않았다면 추가 근거가 없다는 이유로 근거를 부족 처리하지 마세요. "
+            "verdict가 '부분 충족'이면 rubric 세 축을 모두 '부족'으로 두지 마세요. "
+            "답변의 핵심 방향이나 일부 설명을 strengths로 인정했다면 직접성은 최소 '보통'이어야 합니다. "
+            "핵심 요소 하나가 빠졌다는 사실만으로 논리까지 '부족'으로 중복 감점하지 말고, "
+            "답변 내부에 실제 모순이나 연결 단절이 있을 때만 논리를 '부족'으로 평가하세요. "
             "각 rubric 값은 부족·보통·우수 중 하나입니다."
         )
         result_rule = (
@@ -497,18 +526,16 @@ def build_evaluate_prompt(
             "전환하세요."
         )
 
-    term_hint_text = ""
-
-    if term_hints:
-        term_hint_text = (
-            "\n[용어 참고]\n"
-            + ", ".join(term_hints[:12])
-            + "\nSTT 오탈자 가능성만 보정하고 개념 오류로 바로 단정하지 마세요."
-        )
+    term_hint_text = (
+        ", ".join(term_hints[:12])
+        if term_hints
+        else "(별도 용어 힌트 없음)"
+    )
 
     system = (
         f"[페르소나]\n{persona_system}\n\n"
         f"{_QUESTION_CONTRACT_GUIDE}\n"
+        f"{_SEMANTIC_EQUIVALENCE_GUIDE}\n"
         f"{difficulty_hint}\n\n"
         f"[현재 질문 유형 평가 규칙]\n{question_type_rule}\n\n"
         f"{_TYPE_TRANSITION_GUIDE}\n"
@@ -534,6 +561,11 @@ def build_evaluate_prompt(
         '"related_slides": [<관련 슬라이드 번호 1~3개>], '
         '"followup": "<질문 또는 null>", '
         '"followup_question_type": "evidence|counterexample|application|definition 또는 null", '
+        '"expected_point_assessments": ['
+        '{"point_index": <0부터 시작하는 기대 요소 번호>, '
+        '"covered": <true|false>, '
+        '"answer_evidence": "<covered=true이면 학생 답변의 짧은 원문 구절, 아니면 빈 문자열>"}'
+        "], "
         '"rubric": {'
         '"직접성": "부족|보통|우수", '
         '"근거": "부족|보통|우수", '
@@ -553,9 +585,15 @@ def build_evaluate_prompt(
         f"[최초 질문]\n{root_question_text[:700]}\n\n"
         f"[직전 질문]\n{question[:700]}\n\n"
         f"[학생 답변]\n{answer[:1800]}\n\n"
+        f"[용어 참고]\n{term_hint_text}\n\n"
         f"[답변 상태 사전 판정]\n{answer_status_hint}\n\n"
         f"[진행]\nturn={turn}, max_turns={max_turns}, difficulty={difficulty}\n\n"
-        "관련 슬라이드의 흐름과 기대 답변 요소를 함께 보고 응답 JSON을 작성하세요."
+        "기대 답변 요소마다 목록에 표시된 번호를 point_index로 사용해 "
+        "expected_point_assessments를 빠짐없이 작성하세요. "
+        "covered=true의 answer_evidence는 해석하거나 고쳐 쓴 문장이 아니라 학생 답변에서 "
+        "그대로 옮긴 짧은 구절이어야 합니다. 기대 답변 요소가 없거나 answer_status가 unknown이면 "
+        "expected_point_assessments는 빈 배열로 두세요. "
+        "마지막으로 의미상 충족된 요소가 gaps에 들어가지 않았는지 다시 확인한 뒤 응답 JSON을 작성하세요."
     )
 
     return system, user
