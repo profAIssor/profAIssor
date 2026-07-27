@@ -2,6 +2,7 @@
 
 import logging
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Dict, List
 
@@ -23,6 +24,7 @@ from schemas import (
     QuestionRequest,
     QuestionResponse,
     QuestionType,
+    SpeechTermAlias,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,146 @@ def _parse_string_list(raw, *, limit: int = 3) -> List[str]:
 
         if len(result) >= limit:
             break
+
+    return result
+
+
+def _normalize_source_text(value: str) -> str:
+    """원문 포함 여부 비교를 위한 유니코드·공백 정규화."""
+    return re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize("NFKC", value),
+    ).strip().casefold()
+
+
+def _find_source_term(source_text: str, candidate: str) -> str | None:
+    """더 긴 영문 단어의 부분 문자열을 제외하고 원문의 실제 표기를 반환합니다."""
+    normalized_source = unicodedata.normalize("NFKC", source_text)
+    normalized_candidate = re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize("NFKC", candidate),
+    ).strip()
+    if not normalized_candidate:
+        return None
+
+    candidate_pattern = re.escape(normalized_candidate).replace(
+        r"\ ",
+        r"\s+",
+    )
+    matched = re.search(
+        rf"(?<![A-Za-z0-9+#./-]){candidate_pattern}(?![A-Za-z0-9+#./-])",
+        normalized_source,
+        flags=re.IGNORECASE,
+    )
+    if not matched:
+        return None
+
+    return re.sub(r"\s+", " ", matched.group(0)).strip()
+
+
+def _parse_speech_term_aliases(
+    raw,
+    *,
+    source_text: str,
+    term_limit: int = 8,
+    alias_limit: int = 3,
+) -> List[SpeechTermAlias]:
+    """LLM 발음 후보 중 자료 원문에 근거하고 충돌하지 않는 항목만 남깁니다."""
+    if not isinstance(raw, list):
+        return []
+
+    parsed: Dict[str, dict] = {}
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        canonical_raw = item.get("canonical")
+        if not isinstance(canonical_raw, str):
+            continue
+
+        canonical_candidate = re.sub(r"\s+", " ", canonical_raw).strip()
+        canonical = _find_source_term(source_text, canonical_candidate)
+        if canonical is None:
+            continue
+        canonical_key = _normalize_source_text(canonical)
+        if (
+            len(canonical) > 120
+            or not re.search(r"[A-Za-z]", canonical)
+            or not canonical_key
+        ):
+            continue
+
+        aliases_raw = item.get("aliases")
+        if not isinstance(aliases_raw, list):
+            continue
+
+        aliases: List[str] = []
+        for alias_raw in aliases_raw:
+            if not isinstance(alias_raw, str):
+                continue
+
+            alias = re.sub(r"\s+", " ", alias_raw).strip()
+            compact_alias = alias.replace(" ", "")
+            if (
+                len(alias) > 80
+                or len(compact_alias) < 2
+                or not re.fullmatch(r"[가-힣 ]+", alias)
+                # 필러는 버리는 값이 아니라 STT 원문에 남겨야 하는 값입니다.
+                # 여기서는 기술 용어로 덮어쓰는 잘못된 별칭만 차단합니다.
+                or re.fullmatch(r"(?:어+|음+|으+음+)", compact_alias)
+                or alias in aliases
+            ):
+                continue
+
+            aliases.append(alias)
+            if len(aliases) >= alias_limit:
+                break
+
+        if not aliases:
+            continue
+
+        existing = parsed.get(canonical_key)
+        if existing:
+            for alias in aliases:
+                if (
+                    alias not in existing["aliases"]
+                    and len(existing["aliases"]) < alias_limit
+                ):
+                    existing["aliases"].append(alias)
+            continue
+
+        parsed[canonical_key] = {
+            "canonical": canonical,
+            "aliases": aliases,
+        }
+        if len(parsed) >= term_limit:
+            break
+
+    alias_owners: Dict[str, set[str]] = {}
+    for canonical_key, entry in parsed.items():
+        for alias in entry["aliases"]:
+            alias_key = _normalize_source_text(alias)
+            alias_owners.setdefault(alias_key, set()).add(canonical_key)
+
+    result: List[SpeechTermAlias] = []
+    for canonical_key, entry in parsed.items():
+        safe_aliases = [
+            alias
+            for alias in entry["aliases"]
+            if alias_owners.get(_normalize_source_text(alias))
+            == {canonical_key}
+        ]
+        if not safe_aliases:
+            continue
+        result.append(
+            SpeechTermAlias(
+                canonical=entry["canonical"],
+                aliases=safe_aliases,
+            )
+        )
 
     return result
 
@@ -421,6 +563,20 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
         )
 
     question_focus = str(data.get("question_focus", "")).strip()
+    context_source = "\n".join(
+        [
+            question,
+            *[
+                slide.text
+                for slide in req.slides
+                if slide.index in context_slides
+            ],
+        ]
+    )
+    speech_term_aliases = _parse_speech_term_aliases(
+        data.get("speech_term_aliases"),
+        source_text=context_source,
+    )
 
     return QuestionResponse(
         question=question,
@@ -429,5 +585,6 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
         question_focus=question_focus or question[:160],
         context_slides=context_slides,
         expected_answer_points=expected_answer_points,
+        speech_term_aliases=speech_term_aliases,
     )
 

@@ -8,6 +8,7 @@ import {
   buildSpeechContextPhrases,
   buildTermDictionary,
   correctText,
+  mergeSpeechTermAliases,
 } from '../lib/termCorrection'
 import { getPersona } from '../personas'
 import type {
@@ -21,6 +22,7 @@ import type {
   QuestionType,
   Slide,
   SpeechMetrics,
+  SpeechTermAlias,
   TranscriptTurn,
 } from '../types'
 
@@ -43,6 +45,7 @@ interface QuestionState {
   questionFocus: string
   contextSlides: number[]
   expectedAnswerPoints: string[]
+  speechTermAliases: SpeechTermAlias[]
 }
 
 
@@ -255,6 +258,22 @@ export default function SparScreen({
       ),
     })
   }, [questionState, slides])
+  const speechTermAliases = useMemo(
+    () => questionState?.speechTermAliases ?? [],
+    [questionState],
+  )
+  const speechRecognitionPhrases = useMemo(
+    () => [
+      ...new Set([
+        ...speechContextPhrases,
+        ...speechTermAliases.flatMap(({ canonical, aliases }) => [
+          canonical,
+          ...aliases,
+        ]),
+      ]),
+    ],
+    [speechContextPhrases, speechTermAliases],
+  )
   const evaluationTermHints = useMemo(
     () => [
       ...new Set([
@@ -286,7 +305,7 @@ export default function SparScreen({
     getRecognizedFillerMinimum,
     resetTranscript,
   } = useSpeechRecognition({
-    contextPhrases: speechContextPhrases,
+    contextPhrases: speechRecognitionPhrases,
     onFinal: (text) => {
       if (!text) return
       const previous = answerRef.current
@@ -297,13 +316,18 @@ export default function SparScreen({
       const nextAnswer = correctText(
         combined,
         speechContextPhrases,
+        speechTermAliases,
       )
       answerRef.current = nextAnswer
       setAnswer(nextAnswer)
     },
     onInterim: (text) =>
       setInterim(
-        correctText(text, speechContextPhrases),
+        correctText(
+          text,
+          speechContextPhrases,
+          speechTermAliases,
+        ),
       ),
   })
 
@@ -346,6 +370,7 @@ export default function SparScreen({
       questionFocus: response.question_focus,
       contextSlides: response.context_slides,
       expectedAnswerPoints: response.expected_answer_points,
+      speechTermAliases: response.speech_term_aliases ?? [],
     }
     setTurn(targetTurn)
     setQuestionState(nextState)
@@ -605,6 +630,10 @@ export default function SparScreen({
             evaluation.retry_expected_answer_points.length > 0
               ? evaluation.retry_expected_answer_points
               : currentState.expectedAnswerPoints,
+          speechTermAliases: mergeSpeechTermAliases(
+            currentState.speechTermAliases,
+            evaluation.retry_speech_term_aliases ?? [],
+          ),
         })
         currentQuestionChainRef.current = [
           ...currentQuestionChainRef.current,
@@ -731,6 +760,10 @@ export default function SparScreen({
             evaluation.followup_expected_answer_points.length > 0
               ? evaluation.followup_expected_answer_points
               : currentState.expectedAnswerPoints,
+          speechTermAliases: mergeSpeechTermAliases(
+            currentState.speechTermAliases,
+            evaluation.followup_speech_term_aliases ?? [],
+          ),
         })
         currentQuestionChainRef.current = [
           ...currentQuestionChainRef.current,

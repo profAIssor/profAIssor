@@ -40,7 +40,7 @@ function speechSummaryText(session: SessionRecord): string | null {
   ]
 
   if (summary.session_pace_wpm != null) {
-    parts.push(`답변 속도 ${summary.session_pace_wpm.toFixed(1)}어절/분`)
+    parts.push(`평균 답변 속도 ${summary.session_pace_wpm.toFixed(1)}어절/분`)
   }
 
   parts.push(`필러 최소 ${summary.recognized_filler_count}회`)

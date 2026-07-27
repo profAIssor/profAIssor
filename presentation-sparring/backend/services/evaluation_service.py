@@ -21,6 +21,7 @@ from schemas import (
     EvaluateRequest,
     EvaluateResponse,
     QuestionType,
+    SpeechTermAlias,
 )
 from services.question_service import (
     _TYPE_TRANSITIONS,
@@ -28,6 +29,7 @@ from services.question_service import (
     _is_duplicate_question,
     _parse_int_list,
     _parse_question_type,
+    _parse_speech_term_aliases,
     _parse_string_list,
     _question_tokens,
 )
@@ -279,8 +281,13 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         "비정의형 질문을 단순한 용어 정의 질문으로 바꾸지 마세요. "
         "관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요. "
         "retry_focus와 retry_expected_answer_points는 재질문 자체만 평가할 수 있도록 새로 작성하세요. "
+        "retry_speech_term_aliases는 retry_question에 새로 등장한 영문 기술 용어만 포함하며, "
+        "aliases는 뜻이 아니라 영문 단어 경계를 유지한 ko-KR 발음·흔한 STT 변형 1~3개입니다. "
+        "없으면 빈 배열로 두세요. "
         'JSON만 반환: {"supplement":"<사고 지원 설명>","retry_question":"<재질문>",'
         '"retry_focus":"<재질문의 평가 초점>","retry_expected_answer_points":["<요소1>","<요소2>"],'
+        '"retry_speech_term_aliases":[{"canonical":"<원문 영문 용어>",'
+        '"aliases":["<한글 발음 표기>"]}],'
         '"related_slides":[<번호 1~2개>]}. '
     )
     user = (
@@ -344,6 +351,16 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         data.get("retry_expected_answer_points"),
         limit=3,
     ) or fallback_points
+    retry_alias_source = "\n".join(
+        [
+            retry_question,
+            *[slide.text for slide in selected_slides[:3]],
+        ]
+    )
+    retry_speech_term_aliases = _parse_speech_term_aliases(
+        data.get("retry_speech_term_aliases"),
+        source_text=retry_alias_source,
+    )
 
     return EvaluateResponse(
         answer_status="unknown",
@@ -356,6 +373,7 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         retry_question_type=current_type,
         retry_question_focus=retry_focus,
         retry_expected_answer_points=retry_points,
+        retry_speech_term_aliases=retry_speech_term_aliases,
         next_action="retry_after_unknown",
         rubric={},
     )
@@ -1114,7 +1132,13 @@ def _fallback_required_followup(
 def _build_followup(
     req: EvaluateRequest,
     evaluation_data: dict,
-) -> tuple[str, QuestionType, str, List[str]] | None:
+) -> tuple[
+    str,
+    QuestionType,
+    str,
+    List[str],
+    List[SpeechTermAlias],
+] | None:
     """답변의 가장 중요한 보완점을 우선 확인하는 꼬리질문 생성."""
     current_type = req.question_type or req.root_question_type or "definition"
     raw_gap = str(evaluation_data.get("gaps", "")).strip()
@@ -1218,10 +1242,15 @@ def _build_followup(
         "가장 가치 있는 방향 하나를 선택하세요. "
         "질문은 발표 자료와 학생 답변으로 답할 수 있어야 하며, 한 문장에 요구를 하나만 포함하세요. "
         "관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요. "
+        "followup_speech_term_aliases는 followup에 새로 등장한 영문 기술 용어만 포함하며, "
+        "aliases는 뜻이 아니라 영문 단어 경계를 유지한 ko-KR 발음·흔한 STT 변형 1~3개입니다. "
+        "없으면 빈 배열로 두세요. "
         f"{followup_policy} "
         f"{difficulty_followup_rule} "
         'JSON만 반환: {"followup":"<꼬리질문>","followup_question_type":"<evidence|counterexample|application|definition>",'
-        '"followup_focus":"<평가 초점>","followup_expected_answer_points":["<요소1>","<요소2>"]}. '
+        '"followup_focus":"<평가 초점>","followup_expected_answer_points":["<요소1>","<요소2>"],'
+        '"followup_speech_term_aliases":[{"canonical":"<원문 영문 용어>",'
+        '"aliases":["<한글 발음 표기>"]}]}. '
     )
     if not has_meaningful_gap:
         gap_context = "(구체 보완점 없음)"
@@ -1314,7 +1343,24 @@ def _build_followup(
             limit=3,
         ) or fallback_points
 
-    return followup, followup_type, followup_focus, followup_points
+    followup_alias_source = "\n".join(
+        [
+            followup,
+            *[slide.text for slide in selected_slides[:3]],
+        ]
+    )
+    followup_speech_term_aliases = _parse_speech_term_aliases(
+        data.get("followup_speech_term_aliases"),
+        source_text=followup_alias_source,
+    )
+
+    return (
+        followup,
+        followup_type,
+        followup_focus,
+        followup_points,
+        followup_speech_term_aliases,
+    )
 
 
 def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
@@ -1412,6 +1458,7 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
                 followup_type,
                 followup_focus,
                 followup_points,
+                followup_speech_term_aliases,
             ) = followup_contract
             return EvaluateResponse(
                 **response_kwargs,
@@ -1419,6 +1466,7 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
                 followup_question_type=followup_type,
                 followup_focus=followup_focus,
                 followup_expected_answer_points=followup_points,
+                followup_speech_term_aliases=followup_speech_term_aliases,
                 next_action="ask_followup",
             )
 

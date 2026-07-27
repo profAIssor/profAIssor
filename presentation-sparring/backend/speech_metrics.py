@@ -8,8 +8,14 @@ from schemas import (
     TranscriptTurn,
 )
 
-PACE_SLOW_MAX = 90.0
-PACE_FAST_MIN = 160.0
+PACE_VERY_SLOW_MAX_SPS = 4.0
+PACE_NORMAL_MIN_SPS = 5.0
+PACE_TYPICAL_MIN_SPS = 5.5
+PACE_NORMAL_MAX_SPS = 7.5
+PACE_VERY_FAST_MIN_SPS = 8.0
+MIN_PACE_SYLLABLES = 20
+MIN_PACE_ARTICULATION_MS = 5_000
+LONG_PAUSE_MS = 4_000
 VOLUME_LOW_MAX_DB = 4.0
 VOLUME_HIGH_MIN_DB = 10.0
 MIN_VOLUME_VOICED_MS = 8_000
@@ -22,19 +28,25 @@ def _round_optional(value: Optional[float], digits: int = 1) -> Optional[float]:
     return round(value, digits)
 
 
-def _pace_status(pace_wpm: Optional[float]):
+def _pace_status(pace_sps: Optional[float]):
     """세션 말 빠르기 상태 판정."""
-    if pace_wpm is None:
+    if pace_sps is None:
         return None
-    if pace_wpm < PACE_SLOW_MAX:
+    if pace_sps < PACE_VERY_SLOW_MAX_SPS:
         return "slow"
-    if pace_wpm >= PACE_FAST_MIN:
-        return "fast"
-    return "balanced"
+    if pace_sps < PACE_NORMAL_MIN_SPS:
+        return "slightly_slow"
+    if pace_sps < PACE_TYPICAL_MIN_SPS:
+        return "calm"
+    if pace_sps <= PACE_NORMAL_MAX_SPS:
+        return "balanced"
+    if pace_sps <= PACE_VERY_FAST_MIN_SPS:
+        return "slightly_fast"
+    return "fast"
 
 
 def _volume_status(volume_variation_db: Optional[float]):
-    """세션 내 상대 음량 변화 상태 판정."""
+    """세션 내 목소리 크기 변화 상태 판정."""
     if volume_variation_db is None:
         return None
     if volume_variation_db < VOLUME_LOW_MAX_DB:
@@ -70,19 +82,41 @@ def build_speech_summary(
         if metric.confidence != "low"
         and metric.voiced_duration_ms > 0
     ]
+    pace_eligible = [
+        metric
+        for metric in reliable
+        if metric.stt_syllable_count >= MIN_PACE_SYLLABLES
+        and metric.articulation_duration_ms >= MIN_PACE_ARTICULATION_MS
+    ]
 
     total_voiced_duration_ms = sum(
         metric.voiced_duration_ms for metric in reliable
     )
+    total_captured_duration_ms = sum(
+        metric.captured_duration_ms for metric in measured
+    )
+    pace_articulation_duration_ms = sum(
+        metric.articulation_duration_ms for metric in pace_eligible
+    )
     total_stt_word_count = sum(
-        metric.stt_word_count for metric in reliable
+        metric.stt_word_count for metric in pace_eligible
+    )
+    total_stt_syllable_count = sum(
+        metric.stt_syllable_count for metric in pace_eligible
     )
 
     session_pace_wpm: Optional[float] = None
-    if total_voiced_duration_ms >= 4_000 and total_stt_word_count >= 5:
+    if pace_articulation_duration_ms > 0 and total_stt_word_count > 0:
         session_pace_wpm = (
             total_stt_word_count
-            / (total_voiced_duration_ms / 60_000)
+            / (pace_articulation_duration_ms / 60_000)
+        )
+
+    session_pace_sps: Optional[float] = None
+    if pace_articulation_duration_ms > 0 and total_stt_syllable_count > 0:
+        session_pace_sps = (
+            total_stt_syllable_count
+            / (pace_articulation_duration_ms / 1_000)
         )
 
     long_pause_count = sum(
@@ -129,10 +163,13 @@ def build_speech_summary(
     return SpeechSummary(
         measured_answer_count=len(measured),
         reliable_answer_count=len(reliable),
+        pace_answer_count=len(pace_eligible),
         total_answer_count=total_answer_count,
+        total_captured_duration_ms=total_captured_duration_ms,
         total_voiced_duration_ms=total_voiced_duration_ms,
         session_pace_wpm=_round_optional(session_pace_wpm),
-        pace_status=_pace_status(session_pace_wpm),
+        session_pace_sps=_round_optional(session_pace_sps),
+        pace_status=_pace_status(session_pace_sps),
         long_pause_count=long_pause_count,
         longest_pause_ms=(
             max(longest_pause_values)
@@ -173,50 +210,53 @@ def build_speech_delivery_feedback(
     ]
     actions: List[str] = []
 
-    if summary.pace_status == "fast" and summary.session_pace_wpm is not None:
+    if summary.pace_status == "fast" and summary.session_pace_sps is not None:
         observations.append(
-            f"합산 말 빠르기는 약 {summary.session_pace_wpm:.1f}어절/분으로 현재 분석 기준 빠른 편입니다."
+            f"평균 답변 속도는 초당 {summary.session_pace_sps:.1f}음절로 매우 빠른 편입니다."
         )
         actions.append(
             "핵심 결론이나 수치를 말한 뒤 0.5~1초 정도 쉬고 다음 근거로 넘어가세요."
         )
-    elif summary.pace_status == "slow" and summary.session_pace_wpm is not None:
+    elif (
+        summary.pace_status == "slightly_fast"
+        and summary.session_pace_sps is not None
+    ):
         observations.append(
-            f"합산 말 빠르기는 약 {summary.session_pace_wpm:.1f}어절/분으로 현재 분석 기준 느린 편입니다."
+            f"평균 답변 속도는 초당 {summary.session_pace_sps:.1f}음절로 "
+            "다소 빠른 편이지만, 속도만으로는 문제로 판단하지 않습니다."
+        )
+    elif summary.pace_status == "slow" and summary.session_pace_sps is not None:
+        observations.append(
+            f"평균 답변 속도는 초당 {summary.session_pace_sps:.1f}음절로 매우 느린 편입니다."
         )
         actions.append(
-            "첫 문장에서 결론을 먼저 말하고, 근거는 두 문장 이내로 이어가는 방식으로 답변 밀도를 높이세요."
+            "긴 머뭇거림도 함께 반복된다면 첫 문장에서 결론을 먼저 말하는 연습을 해보세요."
         )
-    elif summary.pace_status == "balanced" and summary.session_pace_wpm is not None:
+    elif (
+        summary.pace_status == "slightly_slow"
+        and summary.session_pace_sps is not None
+    ):
         observations.append(
-            f"합산 말 빠르기는 약 {summary.session_pace_wpm:.1f}어절/분으로 현재 분석 범위 안에 있습니다."
+            f"평균 답변 속도는 초당 {summary.session_pace_sps:.1f}음절로 "
+            "다소 느린 편이지만, 속도만으로는 문제로 판단하지 않습니다."
+        )
+    elif summary.pace_status == "calm" and summary.session_pace_sps is not None:
+        observations.append(
+            f"평균 답변 속도는 초당 {summary.session_pace_sps:.1f}음절로 차분하고 무리 없는 범위입니다."
+        )
+    elif summary.pace_status == "balanced" and summary.session_pace_sps is not None:
+        observations.append(
+            f"평균 답변 속도는 초당 {summary.session_pace_sps:.1f}음절로 일반적인 범위입니다."
         )
 
     if summary.long_pause_count > 0:
         observations.append(
-            f"발화 중 1.5초 이상 멈춤이 {summary.long_pause_count}회 있었고, 최장 멈춤은 {_seconds(summary.longest_pause_ms)}였습니다."
+            f"발화 중 {LONG_PAUSE_MS / 1000:g}초 이상 멈춤이 "
+            f"{summary.long_pause_count}회 있었고, 최장 멈춤은 "
+            f"{_seconds(summary.longest_pause_ms)}였습니다."
         )
         actions.append(
             "답변을 시작하기 전에 결론과 근거 한 가지를 정한 뒤, 문장 사이에는 짧은 쉼만 남겨보세요."
-        )
-
-    if (
-        summary.average_initial_latency_ms is not None
-        and summary.average_initial_latency_ms >= 2_000
-    ):
-        observations.append(
-            f"질문 뒤 첫 발화까지의 평균 지연은 {_seconds(summary.average_initial_latency_ms)}였습니다."
-        )
-        actions.append(
-            "질문을 들은 뒤 완성된 문장을 만들기보다 결론 한 문장을 먼저 말하고 설명을 이어가세요."
-        )
-
-    if summary.volume_variation_status == "low":
-        observations.append(
-            "측정 가능한 답변의 상대 음량 변화 폭이 작은 편이었습니다."
-        )
-        actions.append(
-            "핵심 결론과 수치에서만 음량을 조금 높이고, 보충 설명에서는 원래 크기로 돌아오세요."
         )
 
     if summary.recognized_filler_count > 0:
@@ -264,6 +304,11 @@ def build_speech_prompt_context(
             f"- 전체 {summary.total_answer_count}개 답변 중 "
             f"{summary.measured_answer_count}개에서 음성 지표 수집"
         ),
+        (
+            f"- 답변 속도 판정 포함: {summary.pace_answer_count}개 "
+            f"({MIN_PACE_SYLLABLES}음절 이상, 조음 시간 "
+            f"{MIN_PACE_ARTICULATION_MS / 1000:g}초 이상)"
+        ),
     ]
 
     if summary.reliable_answer_count < summary.measured_answer_count:
@@ -279,59 +324,39 @@ def build_speech_prompt_context(
 
     if (
         summary.pace_status is not None
-        and summary.session_pace_wpm is not None
+        and summary.session_pace_sps is not None
     ):
         pace_labels = {
-            "slow": "현재 분석 기준 느린 편",
-            "balanced": "현재 분석 범위 안",
-            "fast": "현재 분석 기준 빠른 편",
+            "slow": "매우 느린 편",
+            "slightly_slow": "다소 느린 편",
+            "calm": "차분한 정상 범위",
+            "balanced": "일반적인 정상 범위",
+            "slightly_fast": "다소 빠른 편",
+            "fast": "매우 빠른 편",
         }
         lines.extend(
             [
                 "[말 빠르기]",
                 f"- 판정: {pace_labels[summary.pace_status]}",
                 (
-                    "- 근거: 신뢰 가능한 음성 답변 합산 "
-                    f"{summary.session_pace_wpm:.1f}어절/분"
+                    "- 근거: 0.25초 이상 무음 휴지를 제외한 조음 시간 기준 "
+                    f"{summary.session_pace_sps:.1f}음절/초"
                 ),
             ]
         )
-        actionable_signal_count += 1
+        if summary.pace_status in {"slow", "fast"}:
+            actionable_signal_count += 1
+        else:
+            lines.append(
+                "- 처리: 이 속도만으로는 개선점이나 경고에 포함하지 않음"
+            )
 
     if summary.long_pause_count > 0:
         lines.extend(
             [
                 "[발화 중 긴 멈춤]",
-                f"- 1.5초 이상 내부 멈춤: {summary.long_pause_count}회",
+                f"- {LONG_PAUSE_MS / 1000:g}초 이상 내부 멈춤: {summary.long_pause_count}회",
                 f"- 최장 멈춤: {_seconds(summary.longest_pause_ms)}",
-            ]
-        )
-        actionable_signal_count += 1
-
-    if (
-        summary.average_initial_latency_ms is not None
-        and summary.average_initial_latency_ms >= 2_000
-    ):
-        lines.extend(
-            [
-                "[답변 착수 지연]",
-                (
-                    "- 질문 뒤 첫 발화까지 평균: "
-                    f"{_seconds(summary.average_initial_latency_ms)}"
-                ),
-            ]
-        )
-        actionable_signal_count += 1
-
-    if summary.volume_variation_status == "low":
-        lines.extend(
-            [
-                "[상대 음량 변화]",
-                "- 판정: 측정 가능한 답변에서 변화 폭이 작은 편",
-                (
-                    "- 주의: 브라우저 자동 음량 보정의 영향을 받으므로 "
-                    "절대 음량이나 감정 상태로 해석 금지"
-                ),
             ]
         )
         actionable_signal_count += 1

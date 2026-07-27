@@ -370,6 +370,9 @@ def build_question_prompt(
         "학생에게 보이지 않는 내부 평가 기준이라는 이유로 질문보다 넓은 범위를 넣지 마세요. "
         "context_slides는 질문을 이해하고 평가하는 데 실제로 필요한 슬라이드 번호만 오름차순으로 넣으세요. "
         "targets_slide는 질문과 가장 직접적으로 연결된 대표 슬라이드 한 장의 번호이며 없으면 null입니다. "
+        "speech_term_aliases는 질문·context_slides 원문의 영문 기술 용어 최대 8개만 포함하며, "
+        "aliases는 뜻이 아니라 영문 단어 경계를 유지한 ko-KR 발음·흔한 STT 변형 1~3개입니다. "
+        "없으면 빈 배열로 두세요. "
         "질문은 한국어 존댓말 한 문장으로 작성하세요.\n"
         'JSON만 반환: {'
         '"question": "<한국어 한 문장>", '
@@ -377,7 +380,11 @@ def build_question_prompt(
         '"targets_slide": <정수 또는 null>, '
         '"question_focus": "<검증할 핵심 주제를 짧은 한국어 구절로>", '
         '"context_slides": [<관련 슬라이드 번호 1~3개>], '
-        '"expected_answer_points": ["<자료 기반 핵심 요소 1>", "<선택 요소 2>"]'
+        '"expected_answer_points": ["<자료 기반 핵심 요소 1>", "<선택 요소 2>"], '
+        '"speech_term_aliases": ['
+        '{"canonical": "<자료 원문의 영문 용어>", '
+        '"aliases": ["<한글 발음 표기 1>", "<선택 발음 표기 2>"]}'
+        "]"
         "}"
     )
 

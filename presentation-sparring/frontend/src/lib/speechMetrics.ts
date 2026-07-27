@@ -16,6 +16,7 @@ export interface CapturedSpeechSegment {
 interface AnalyzedSegment {
   capturedDurationMs: number
   voicedDurationMs: number
+  articulationDurationMs: number
   initialLatencyMs: number | null
   internalPausesMs: number[]
   volumeVariationDb: number | null
@@ -26,10 +27,12 @@ interface AnalyzedSegment {
 export const SPEECH_METRIC_CONFIG = {
   frameIntervalMs: 50,
   minVoiceRunMs: 150,
+  minArticulationPauseMs: 250,
   minInternalPauseMs: 600,
-  longPauseMs: 1500,
-  minVoicedDurationForPaceMs: 4000,
-  minWordsForPace: 5,
+  longPauseMs: 4000,
+  minVoicedDurationForAnalysisMs: 4000,
+  minArticulationDurationForPaceMs: 5000,
+  minSyllablesForPace: 20,
   minimumDynamicRangeDb: 6,
 } as const
 
@@ -135,6 +138,7 @@ function analyzeSegment(
     return {
       capturedDurationMs,
       voicedDurationMs: 0,
+      articulationDurationMs: 0,
       initialLatencyMs: null,
       internalPausesMs: [],
       volumeVariationDb: null,
@@ -199,6 +203,7 @@ function analyzeSegment(
     return {
       capturedDurationMs,
       voicedDurationMs: 0,
+      articulationDurationMs: 0,
       initialLatencyMs: null,
       internalPausesMs: [],
       volumeVariationDb: null,
@@ -217,12 +222,13 @@ function analyzeSegment(
     }
   }
 
+  const articulationPausesMs: number[] = []
   const internalPausesMs: number[] = []
   let pauseStartIndex: number | null = null
 
   for (
     let index = firstVoicedIndex + 1;
-    index < lastVoicedIndex;
+    index <= lastVoicedIndex;
     index += 1
   ) {
     if (!voicedFrames[index] && pauseStartIndex == null) {
@@ -235,6 +241,13 @@ function analyzeSegment(
       const pauseEnd = frames[index].elapsed_ms
       const pauseDuration = Math.max(0, pauseEnd - pauseStart)
 
+      if (
+        pauseDuration >=
+        SPEECH_METRIC_CONFIG.minArticulationPauseMs
+      ) {
+        articulationPausesMs.push(Math.round(pauseDuration))
+      }
+
       if (pauseDuration >= SPEECH_METRIC_CONFIG.minInternalPauseMs) {
         internalPausesMs.push(Math.round(pauseDuration))
       }
@@ -242,6 +255,24 @@ function analyzeSegment(
       pauseStartIndex = null
     }
   }
+
+  const speechSpanEndMs = Math.min(
+    capturedDurationMs,
+    frames[lastVoicedIndex].elapsed_ms +
+      resolveFrameDuration(frames, lastVoicedIndex),
+  )
+  const speechSpanDurationMs = Math.max(
+    0,
+    speechSpanEndMs - frames[firstVoicedIndex].elapsed_ms,
+  )
+  const articulationDurationMs = Math.max(
+    0,
+    speechSpanDurationMs -
+      articulationPausesMs.reduce(
+        (sum, duration) => sum + duration,
+        0,
+      ),
+  )
 
   const voicedRmsValues = frames
     .filter((_, index) => voicedFrames[index])
@@ -264,7 +295,7 @@ function analyzeSegment(
       ? 'low'
       : continuousVoiceFallback ||
           voicedDurationMs <
-            SPEECH_METRIC_CONFIG.minVoicedDurationForPaceMs
+            SPEECH_METRIC_CONFIG.minVoicedDurationForAnalysisMs
         ? 'medium'
         : 'high'
 
@@ -272,12 +303,15 @@ function analyzeSegment(
     confidence === 'medium' &&
     !reasons.includes('유효 발화 시간이 1초 미만')
   ) {
-    reasons.push('말 빠르기 판단에 필요한 발화 시간 부족')
+    reasons.push('음성 분석에 필요한 유효 발화 시간 부족')
   }
 
   return {
     capturedDurationMs,
     voicedDurationMs: Math.round(voicedDurationMs),
+    articulationDurationMs: Math.round(
+      articulationDurationMs,
+    ),
     initialLatencyMs: Math.round(frames[firstVoicedIndex].elapsed_ms),
     internalPausesMs,
     volumeVariationDb:
@@ -292,6 +326,22 @@ function analyzeSegment(
 /** 한국어 답변의 공백 기준 어절 수 계산. */
 export function countSttWords(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0
+}
+
+/** 한국어 발표 속도 판정을 위한 음절 수를 계산합니다. */
+export function countSttSyllables(text: string): number {
+  const normalized = text.normalize('NFKC')
+  const hangulCount = normalized.match(/[가-힣]/g)?.length ?? 0
+  const digitCount = normalized.match(/\d/g)?.length ?? 0
+  const latinCount = (normalized.match(/[A-Za-z]+/g) ?? []).reduce(
+    (sum, token) => {
+      const vowelGroups = token.toLowerCase().match(/[aeiouy]+/g)
+      return sum + Math.max(1, vowelGroups?.length ?? 0)
+    },
+    0,
+  )
+
+  return hangulCount + latinCount + digitCount
 }
 
 /** STT 문자열에서 강한 필러의 인식 하한선 계산. */
@@ -470,7 +520,12 @@ export function buildSpeechMetrics(
     (sum, segment) => sum + segment.voicedDurationMs,
     0,
   )
+  const articulationDurationMs = analyzed.reduce(
+    (sum, segment) => sum + segment.articulationDurationMs,
+    0,
+  )
   const sttWordCount = countSttWords(rawFinalSttText)
+  const sttSyllableCount = countSttSyllables(rawFinalSttText)
   const internalPauses = analyzed.flatMap(
     (segment) => segment.internalPausesMs,
   )
@@ -509,33 +564,32 @@ export function buildSpeechMetrics(
   } else if (
     analyzed.some((segment) => segment.confidence === 'low') ||
     voicedDurationMs <
-      SPEECH_METRIC_CONFIG.minVoicedDurationForPaceMs
+      SPEECH_METRIC_CONFIG.minVoicedDurationForAnalysisMs
   ) {
     confidence = 'medium'
   }
 
   const paceWpm =
     confidence !== 'low' &&
-    voicedDurationMs >=
-      SPEECH_METRIC_CONFIG.minVoicedDurationForPaceMs &&
-    sttWordCount >= SPEECH_METRIC_CONFIG.minWordsForPace
+    articulationDurationMs >=
+      SPEECH_METRIC_CONFIG.minArticulationDurationForPaceMs &&
+    sttSyllableCount >=
+      SPEECH_METRIC_CONFIG.minSyllablesForPace
       ? Number(
           (
             sttWordCount /
-            (voicedDurationMs / 60_000)
+            (articulationDurationMs / 60_000)
           ).toFixed(1),
         )
       : null
 
+  const paceExclusionReason =
+    '20음절 또는 조음 시간 5초 미만이라 속도 판정 제외'
   if (
     paceWpm == null &&
-    !confidenceReasons.includes(
-      '말 빠르기 판단에 필요한 발화량 부족',
-    )
+    !confidenceReasons.includes(paceExclusionReason)
   ) {
-    confidenceReasons.push(
-      '말 빠르기 판단에 필요한 발화량 부족',
-    )
+    confidenceReasons.push(paceExclusionReason)
   }
 
   return {
@@ -546,9 +600,11 @@ export function buildSpeechMetrics(
     segment_count: segments.length,
     captured_duration_ms: capturedDurationMs,
     voiced_duration_ms: voicedDurationMs,
+    articulation_duration_ms: articulationDurationMs,
     initial_response_latency_ms:
       firstVoicedSegment?.initialLatencyMs ?? null,
     stt_word_count: sttWordCount,
+    stt_syllable_count: sttSyllableCount,
     pace_wpm: paceWpm,
     internal_pause_count: internalPauses.length,
     long_pause_count: internalPauses.filter(
