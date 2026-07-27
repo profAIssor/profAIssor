@@ -21,6 +21,7 @@ import type {
   QuestionRole,
   QuestionType,
   Slide,
+  SparringLanguage,
   SpeechMetrics,
   SpeechTermAlias,
   TranscriptTurn,
@@ -31,6 +32,7 @@ interface Props {
   slides: Slide[]
   personaIds: PersonaId[]
   difficulty: Difficulty
+  language: SparringLanguage
   maxTurns: number
   field: AcademicField | null
   onFinish: (transcript: TranscriptTurn[]) => void
@@ -70,11 +72,29 @@ const QUESTION_STOPWORDS = new Set([
   '대해서',
   '자료',
   '발표',
+  'what',
+  'how',
+  'why',
+  'could',
+  'would',
+  'please',
+  'explain',
+  'describe',
+  'presentation',
+  'the',
+  'and',
+  'from',
 ])
 
 // 백엔드는 난이도별로 기본 질문을 재생성하고, 이 값은 이미 받은 질문과
 // 꼬리질문을 화면에 중복 삽입하지 않기 위한 마지막 로컬 안전망입니다.
 const LOCAL_QUESTION_DUPLICATE_THRESHOLD = 0.72
+
+const DIFFICULTY_LABELS: Record<Difficulty, string> = {
+  easy: '쉬움',
+  medium: '보통',
+  hard: '어려움',
+}
 
 /** 질문 문자열의 중복 비교용 정규화. */
 function normalizeQuestion(question: string): string {
@@ -187,12 +207,34 @@ const SLIDE_RECOVERY_TIPS = [
   ),
 ] as const
 
+const ENGLISH_GENERAL_RECOVERY_TIPS = [
+  'Briefly restate the question: “If I understand correctly, the key point is …” This confirms the question and gives you a moment to organize your answer.',
+  'A short pause is fine. Breathe out slowly, then begin with “The main point is …”',
+  'If the answer is not immediate, set a structure first: “I would break this into two points.” Then start with the first point.',
+  'If the question is broad or ambiguous, ask: “Should I address this from the perspective of …?” Clarifying the scope is part of answering accurately.',
+  'If you cannot recall an exact detail, separate what you know from what needs checking: “I would need to verify the exact figure, but the key mechanism is …”',
+  'Use a short answer structure: conclusion → reason → example → conclusion. Starting with one clear conclusion makes the rest easier to deliver.',
+] as const
+
+const ENGLISH_SLIDE_RECOVERY_TIPS = [
+  'Turn to the relevant slide and say, “Let me walk through this using the slide.” Use the visual as the structure for your answer.',
+  'While locating the relevant slide, say, “I’ll refer to the material connected to your question.” A brief pause to check the slide is natural.',
+  'If the slide contains a chart or diagram, begin with its title or axis: “The first thing to notice here is …”',
+] as const
+
 /** 내용 힌트 없이 발표 진행 시간을 확보하는 침묵 회복 팁 생성. */
 function buildLongSilenceTip(
   questionState: QuestionState,
   tipSequence: number,
+  language: SparringLanguage,
 ): string {
-  const tips =
+  const tips = language === 'en'
+    ? (
+        questionState.contextSlides.length > 0
+          ? [...ENGLISH_GENERAL_RECOVERY_TIPS, ...ENGLISH_SLIDE_RECOVERY_TIPS]
+          : [...ENGLISH_GENERAL_RECOVERY_TIPS]
+      )
+    :
     questionState.contextSlides.length > 0
       ? [
           ...GENERAL_RECOVERY_TIPS,
@@ -219,10 +261,12 @@ export default function SparScreen({
   slides,
   personaIds,
   difficulty,
+  language,
   maxTurns,
   field,
   onFinish,
 }: Props) {
+  const isEnglish = language === 'en'
   const [personaIndex, setPersonaIndex] = useState(0)
   // 현재 사용 중인 질문 슬롯의 0부터 시작하는 순번
   const [turn, setTurn] = useState(0)
@@ -312,6 +356,7 @@ export default function SparScreen({
     getRecognizedFillerMinimum,
     resetTranscript,
   } = useSpeechRecognition({
+    lang: language === 'en' ? 'en-US' : 'ko-KR',
     contextPhrases: speechRecognitionPhrases,
     onFinal: (text) => {
       if (!text) return
@@ -407,6 +452,7 @@ export default function SparScreen({
         personaId,
         difficulty,
         field,
+        language,
         askedRootQuestionsRef.current,
       )
       applyQuestionResponse(response, personaId, targetTurn)
@@ -495,6 +541,7 @@ export default function SparScreen({
         text: buildLongSilenceTip(
           questionState,
           longSilenceSignal,
+          language,
         ),
       },
     ])
@@ -504,6 +551,7 @@ export default function SparScreen({
     longSilenceSignal,
     metricRecording,
     questionState,
+    language,
   ])
 
   /** textarea와 ref의 답변 동기화. */
@@ -589,6 +637,7 @@ export default function SparScreen({
         maxTurns,
         difficulty,
         field,
+        language,
         termHints: evaluationTermHints,
       })
 
@@ -665,8 +714,7 @@ export default function SparScreen({
         pushMessage({
           role: 'verdict',
           personaId,
-          text:
-            '재질문에도 답변하지 못했습니다. 아래 개념 설명을 확인한 뒤 이 질문과 관련된 내용을 다시 학습해 주세요.',
+          text: '재질문에도 답변하지 못했습니다. 아래 개념 설명을 확인한 뒤 이 질문과 관련된 내용을 다시 학습해 주세요.',
           answerStatus: 'unknown',
           supplement: evaluation.supplement,
           supplementTitle: '개념 정리',
@@ -684,6 +732,11 @@ export default function SparScreen({
             : `평가: ${evaluation.verdict} ✅ ${evaluation.strengths} ⚠️ ${evaluation.gaps}`,
           rubric: isUnknown ? undefined : evaluation.rubric,
           answerStatus: evaluation.answer_status,
+          supplement: evaluation.supplement,
+          supplementTitle: evaluation.supplement
+            ? '개념 정리'
+            : undefined,
+          relatedSlides: evaluation.related_slides,
         })
       }
 
@@ -715,7 +768,7 @@ export default function SparScreen({
             ? { retry_speech_metrics: speechMetrics }
             : {}),
           final_explanation:
-            isUnknown && evaluation.supplement
+            evaluation.supplement
               ? evaluation.supplement
               : null,
         })
@@ -822,7 +875,16 @@ export default function SparScreen({
             {persona.emoji}
           </span>
           <div>
-            <div className="text-base font-bold text-slate-800">{persona.name}</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-base font-bold text-slate-800">
+                {persona.name}
+              </div>
+              <span
+                className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-600"
+              >
+                난이도 {DIFFICULTY_LABELS[difficulty]}
+              </span>
+            </div>
             <div className="text-sm text-slate-500">
               남은 질문 횟수 {remainingQuestionCount}회
               <span className="ml-1.5 text-xs text-slate-400">
@@ -860,10 +922,14 @@ export default function SparScreen({
           className="shrink-0 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900"
         >
           <span className="font-semibold">
-            음성 입력 없이 텍스트로 스파링을 진행합니다.
+            {isEnglish
+              ? 'Voice input is unavailable; continue with text input.'
+              : '음성 입력 없이 텍스트로 스파링을 진행합니다.'}
           </span>{' '}
-          {browserSupport.message ??
-            '현재 환경에서는 음성 입력을 사용할 수 없습니다.'}
+          {isEnglish
+            ? 'Speech recognition is not available in this browser.'
+            : browserSupport.message ??
+              '현재 환경에서는 음성 입력을 사용할 수 없습니다.'}
         </div>
       )}
 
@@ -907,11 +973,10 @@ export default function SparScreen({
                 <div className="w-full max-w-[96%] space-y-3 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3.5 text-sm leading-relaxed text-slate-700 sm:max-w-[92%] sm:text-base">
                   <div className="whitespace-pre-wrap">{message.text}</div>
 
-                  {message.answerStatus === 'unknown' && message.supplement && (
+                  {message.supplement && (
                     <div className="rounded-lg border border-indigo-100 bg-white px-3.5 py-3">
                       <div className="mb-1.5 text-sm font-bold text-indigo-700">
-                        {message.supplementTitle ??
-                          '생각해 볼 기본 아이디어'}
+                        {message.supplementTitle ?? '생각해 볼 기본 아이디어'}
                       </div>
                       <div className="whitespace-pre-wrap text-slate-700">
                         {message.supplement}
@@ -949,7 +1014,7 @@ export default function SparScreen({
                                 : 'bg-rose-50 text-rose-700')
                           }
                         >
-                          {axis} {value}
+                          {`${axis} ${value}`}
                         </span>
                       ))}
                     </div>
@@ -979,7 +1044,7 @@ export default function SparScreen({
         {busy && (
           <div className="flex justify-start">
             <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-3 text-base text-slate-500 shadow-sm">
-              생각 중…
+              {isEnglish ? 'Thinking…' : '생각 중…'}
               <div className="flex gap-1">
                 {[0, 120, 240].map((delay) => (
                   <span
@@ -995,7 +1060,7 @@ export default function SparScreen({
 
         {error && (
           <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-600">
-            오류: {error}
+            {isEnglish ? 'Error' : '오류'}: {error}
           </div>
         )}
 
@@ -1030,9 +1095,11 @@ export default function SparScreen({
           {listening && (
             <div className="flex min-w-0 items-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3.5 py-2.5 text-sm text-rose-700">
               <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-rose-500" />
-              <span className="shrink-0 font-semibold">받아쓰는 중…</span>
+              <span className="shrink-0 font-semibold">
+                {isEnglish ? 'Listening…' : '받아쓰는 중…'}
+              </span>
               <span className="min-w-0 truncate text-slate-500">
-                {interim || '(말해 보세요)'}
+                {interim || (isEnglish ? '(start speaking)' : '(말해 보세요)')}
               </span>
             </div>
           )}
@@ -1044,7 +1111,11 @@ export default function SparScreen({
                 data-testid="mic-btn"
                 onClick={() => void handleMicToggle()}
                 disabled={busy || !questionState}
-                title={listening ? '받아쓰기 중지' : '음성으로 답변 (STT)'}
+                title={
+                  listening
+                    ? (isEnglish ? 'Stop dictation' : '받아쓰기 중지')
+                    : (isEnglish ? 'Answer by voice (STT)' : '음성으로 답변 (STT)')
+                }
                 className={
                   'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border transition disabled:cursor-not-allowed disabled:opacity-40 ' +
                   (listening
@@ -1070,9 +1141,13 @@ export default function SparScreen({
               disabled={busy || !questionState}
               rows={2}
               placeholder={
-                voiceInputAvailable
-                  ? '답변을 입력하거나 마이크로 말하세요. (Enter 전송, Shift+Enter 줄바꿈)'
-                  : '답변을 입력하세요. (Enter 전송, Shift+Enter 줄바꿈)'
+                isEnglish
+                  ? voiceInputAvailable
+                    ? 'Type or speak your answer. (Enter to submit, Shift+Enter for a new line)'
+                    : 'Type your answer. (Enter to submit, Shift+Enter for a new line)'
+                  : voiceInputAvailable
+                    ? '답변을 입력하거나 마이크로 말하세요. (Enter 전송, Shift+Enter 줄바꿈)'
+                    : '답변을 입력하세요. (Enter 전송, Shift+Enter 줄바꿈)'
               }
               className="min-h-12 min-w-0 flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-base leading-relaxed text-slate-700 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 sm:px-4"
             />
@@ -1085,11 +1160,13 @@ export default function SparScreen({
                 !questionState ||
                 (!answer.trim() && !listening)
               }
-              aria-label="답변 전송"
+              aria-label={isEnglish ? 'Submit answer' : '답변 전송'}
               className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-base font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 sm:px-6"
             >
               <Send className="h-5 w-5" />
-              <span className="hidden sm:inline">답변</span>
+              <span className="hidden sm:inline">
+                {isEnglish ? 'Answer' : '답변'}
+              </span>
             </button>
           </div>
         </div>

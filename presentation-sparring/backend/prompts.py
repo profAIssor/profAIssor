@@ -104,7 +104,16 @@ _SEMANTIC_EQUIVALENCE_GUIDE = """
 학생 답변은 음성 인식(STT) 전사일 수 있습니다. 평가 전에 질문, 관련 슬라이드, 용어 참고를 이용해
 조사·어미·띄어쓰기와 문맥상 명백한 음성 오인식을 내부적으로 복원하세요.
 예를 들어 문맥이 뒷받침하면 "주변 케익의 토큰"을 "주변 K개의 토큰"으로 해석할 수 있습니다.
+전사 표현이 발표 자료의 용어와 다르더라도 질문·관련 슬라이드·주변 문맥을 함께 보았을 때
+하나의 원문 용어로만 해석된다면 그 용어로 복원해 의미를 평가하세요.
+strengths와 gaps는 사용자가 바로 이해할 수 있는 자기완결적인 한국어 평가여야 합니다.
+자료·답변의 원문 문장, 조건식, 식별자, 기호를 그대로 붙여 넣어 부족한 점을 대신 설명하지 마세요.
+기술 용어·고유 명칭은 꼭 필요할 때만 원문 표기를 유지하되, 그 용어가 이 질문에서 어떤 개념·관계·조건과
+연결되는지 한국어로 설명하세요. 문맥만으로 역할을 확정할 수 없는 표기는 평가에 사용하거나 임의로 해석하지 마세요.
+answer_evidence만 내부 검증용으로 학생 답변에서 그대로 복사한 짧은 원문 구절을 사용하세요. 이는 사용자에게 보이는
+strengths와 gaps의 문체를 결정하는 근거가 아닙니다.
 다만 문맥으로 확정할 수 없는 누락된 주장이나 근거를 새로 만들어 답변에 보태지는 마세요.
+복원 후보가 둘 이상이거나 자료에서 근거를 찾을 수 없다면 임의로 정답 처리하지 말고 표현이 모호하다고 판단하세요.
 """
 
 
@@ -282,6 +291,7 @@ def build_question_prompt(
     difficulty: str = "medium",
     question_type_priority: Sequence[str] | None = None,
     excluded_questions: List[str] | None = None,
+    language: str = "ko",
 ):
     """전체 자료 흐름을 바탕으로 유형과 내부 평가 맥락이 있는 최초 질문을 생성합니다."""
     difficulty_hint = _DIFFICULTY_HINTS.get(
@@ -290,6 +300,21 @@ def build_question_prompt(
     )
 
     priority_text = _format_question_type_priority(question_type_priority)
+    if language == "en":
+        output_language_rule = (
+            "[Output language]\n"
+            "Treat the presentation script and slides as English material. Write question, question_focus, "
+            "and expected_answer_points in natural English. Ask one polite English question. Preserve technical "
+            "terms exactly as written in the source. Set speech_term_aliases to an empty array because English "
+            "speech recognition uses the source terms directly."
+        )
+    else:
+        output_language_rule = (
+            "[출력 언어]\n"
+            "question, question_focus, expected_answer_points는 자연스러운 한국어로 작성하세요. "
+            "질문은 한국어 존댓말 한 문장으로 작성하세요. speech_term_aliases에는 원문의 영문 기술 용어와 "
+            "ko-KR 발음·흔한 STT 변형만 넣고, 없으면 빈 배열로 두세요."
+        )
 
     system = (
         f"[페르소나]\n{persona_system}\n\n"
@@ -298,6 +323,7 @@ def build_question_prompt(
         f"{_QUESTION_CONTRACT_GUIDE}\n"
         f"[질문 유형 우선순위]\n{priority_text}\n\n"
         f"{difficulty_hint}\n\n"
+        f"{output_language_rule}\n\n"
         "[질문 생성 순서]\n"
         "1. 발표 대본과 모든 슬라이드를 처음부터 끝까지 읽으세요.\n"
         "2. 자료의 성격과 도입→설명→비교·근거→예시·결론의 실제 흐름을 내부적으로 정리하세요.\n"
@@ -321,15 +347,12 @@ def build_question_prompt(
         "학생에게 보이지 않는 내부 평가 기준이라는 이유로 질문보다 넓은 범위를 넣지 마세요. "
         "context_slides는 질문을 이해하고 평가하는 데 실제로 필요한 슬라이드 번호만 오름차순으로 넣으세요. "
         "targets_slide는 질문과 가장 직접적으로 연결된 대표 슬라이드 한 장의 번호이며 없으면 null입니다. "
-        "speech_term_aliases는 질문·context_slides 원문의 영문 기술 용어 최대 8개만 포함하며, "
-        "aliases는 뜻이 아니라 영문 단어 경계를 유지한 ko-KR 발음·흔한 STT 변형 1~3개입니다. "
-        "없으면 빈 배열로 두세요. "
-        "질문은 한국어 존댓말 한 문장으로 작성하세요.\n"
+        "speech_term_aliases는 출력 언어 규칙을 따르세요.\n"
         'JSON만 반환: {'
-        '"question": "<한국어 한 문장>", '
+        '"question": "<질문 한 문장>", '
         '"question_type": "evidence|counterexample|application|definition", '
         '"targets_slide": <정수 또는 null>, '
-        '"question_focus": "<검증할 핵심 주제를 짧은 한국어 구절로>", '
+        '"question_focus": "<검증할 핵심 주제>", '
         '"context_slides": [<관련 슬라이드 번호 1~3개>], '
         '"expected_answer_points": ["<자료 기반 핵심 요소 1>", "<선택 요소 2>"], '
         '"speech_term_aliases": ['
@@ -364,12 +387,28 @@ def build_evaluate_prompt(
     question_focus: str = "",
     context_slides: List[int] | None = None,
     expected_answer_points: List[str] | None = None,
+    language: str = "ko",
 ):
     """자료 맥락을 참고해 답변 내용만 평가합니다."""
     difficulty_hint = _EVALUATION_DIFFICULTY_HINTS.get(
         difficulty,
         _EVALUATION_DIFFICULTY_HINTS["medium"],
     )
+    if language == "en":
+        output_language_rule = (
+            "[Output language]\n"
+            "Interpret the student's answer as an English presentation answer, but write strengths, gaps, and every "
+            "user-visible evaluation or coaching explanation in natural Korean. Preserve English source technical "
+            "terms exactly only when they are needed in the explanation. Do not use raw source sentences, formulas, "
+            "or unexplained notation as visible feedback. Only answer_evidence is an internal exact source excerpt. "
+            "For server "
+            "compatibility, keep answer_status, verdict, rubric keys, and rubric values in the exact enumerated "
+            "forms required by the JSON schema."
+        )
+    else:
+        output_language_rule = (
+            "[출력 언어]\n학생에게 보이는 설명은 자연스러운 한국어로 작성하세요."
+        )
 
     root_question_text = (root_question or question).strip()
     root_type_text = (
@@ -426,6 +465,7 @@ def build_evaluate_prompt(
         f"{_QUESTION_CONTRACT_GUIDE}\n"
         f"{_SEMANTIC_EQUIVALENCE_GUIDE}\n"
         f"{difficulty_hint}\n\n"
+        f"{output_language_rule}\n\n"
         f"[현재 질문 유형 평가 규칙]\n{question_type_rule}\n\n"
         "먼저 직전 질문의 명시적 요구를 추출한 뒤 그 범위만 평가하세요. "
         "질문이 두 명칭을 묻고 학생이 두 명칭을 정확히 답했다면 그 답변은 충분합니다. "

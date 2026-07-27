@@ -26,6 +26,7 @@ import type {
   Persona,
   PersonaId,
   Slide,
+  SparringLanguage,
 } from '../types'
 import SlideInput from './SlideInput'
 
@@ -39,6 +40,7 @@ interface SetupData {
 }
 
 interface Props {
+  language: SparringLanguage
   onStart: (data: SetupData) => void
 }
 
@@ -96,8 +98,10 @@ const SAMPLE_SLIDES: Slide[] = [
 
 /** 발표 자료 등록과 질의응답 조건 설정 화면. */
 export default function SetupScreen({
+  language,
   onStart,
 }: Props) {
+  const isEnglish = language === 'en'
   const cachedPersonas = getCachedPersonas()
 
   const [script, setScript] = useState('')
@@ -216,15 +220,24 @@ export default function SetupScreen({
   return (
     <div className="mx-auto max-w-7xl">
       <div className="mb-8 text-center">
-        <h1 className="text-3xl font-black tracking-tight text-slate-900">
-          prof
-          <span className="text-indigo-600">
-            AI
-          </span>
-          ssor
-        </h1>
+        <div className="flex items-center justify-center">
+          <h1 className="text-3xl font-black tracking-tight text-slate-900">
+            {isEnglish && (
+              <span className="mr-2 text-indigo-600">
+                English
+              </span>
+            )}
+            prof
+            <span className="text-indigo-600">
+              AI
+            </span>
+            ssor
+          </h1>
+        </div>
         <p className="mt-2 text-sm text-slate-500">
-          발표 자료를 바탕으로 예상 질문과 답변 대응을 연습하는 질의응답 스파링 도구
+          {isEnglish
+            ? '영문 발표 자료를 바탕으로 영어 질문과 영어 음성 답변을 연습합니다.'
+            : '발표 자료를 바탕으로 예상 질문과 답변 대응을 연습하는 질의응답 스파링 도구'}
         </p>
       </div>
 
@@ -508,7 +521,9 @@ export default function SetupScreen({
             onClick={startSparring}
             className="w-full rounded-xl bg-indigo-600 py-4 text-lg font-semibold text-white shadow-lg shadow-indigo-600/10 transition-all hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            질의응답 스파링 시작 →
+            {isEnglish
+              ? '영문 질의응답 스파링 시작 →'
+              : '질의응답 스파링 시작 →'}
           </button>
 
           {!canStart && (

@@ -205,12 +205,14 @@ def _generate_speech_delivery_feedback(
     speech_context: str,
     *,
     draft: str,
+    language: str = "ko",
 ) -> str:
     """측정값과 실제 답변을 근거로 음성 코칭만 집중 생성."""
     system, user = report_prompt.build_speech_coaching_prompt(
         transcript,
         speech_context,
         draft=draft,
+        language=language,
     )
     try:
         data = llm_client.chat_json(
@@ -564,6 +566,27 @@ def _missing_reference_indices(
     ]
 
 
+def _filter_reference_answers_by_language(
+    language: str,
+    answer_coaching: List[AnswerCoaching],
+) -> List[AnswerCoaching]:
+    """영문 모드에서 한국어 참고 답변을 재생성 대상으로 돌립니다."""
+    if language != "en":
+        return answer_coaching
+
+    valid: List[AnswerCoaching] = []
+    for item in answer_coaching:
+        reference_answer = item.reference_answer or ""
+        if re.search(r"[가-힣]", reference_answer):
+            logger.warning(
+                "Non-English reference answer rejected: turn_index=%s",
+                item.turn_index,
+            )
+            continue
+        valid.append(item)
+    return valid
+
+
 def _format_reference_repair_material(
     req: ReportRequest,
     missing_indices: List[int],
@@ -640,10 +663,16 @@ def _repair_missing_reference_answers(
         missing_indices,
     )
 
+    answer_language_rule = (
+        "Write each reference_answer value as 1 to 3 complete English sentences. "
+        "Do not use Korean prose in reference_answer even if the surrounding evaluation is Korean. "
+        if req.language == "en"
+        else "각 참고 답변은 한국어 1~3문장의 완결된 답변으로 작성하세요. "
+    )
     system = (
         "당신은 발표 질의응답 리포트에서 누락된 참고 답변만 보완합니다. "
         "각 항목의 질문과 발표 자료를 근거로 질문에 직접 답하는 "
-        "한국어 1~3문장의 완결된 참고 답변을 작성하세요. "
+        f"{answer_language_rule}"
         "학생 답변을 평가하거나 '부족했다'고 언급하지 마세요. "
         "쉬운 재질문이 제시된 항목은 원질문이 아니라 쉬운 재질문에 답하세요. "
         "발표 자료에 없는 사실을 만들지 마세요. "
@@ -695,7 +724,13 @@ def _repair_missing_reference_answers(
                 item.get("reference_answer"),
                 limit=900,
             )
-            if reference_answer:
+            if (
+                reference_answer
+                and (
+                    req.language != "en"
+                    or not re.search(r"[가-힣]", reference_answer)
+                )
+            ):
                 repaired_by_index[index] = reference_answer
 
     merged = {
@@ -774,6 +809,7 @@ def build_report(req: ReportRequest) -> ReportResponse:
         req.slides,
         req.transcript,
         speech_context=speech_prompt_context,
+        language=req.language,
     )
     try:
         data = llm_client.chat_json(
@@ -845,6 +881,10 @@ def build_report(req: ReportRequest) -> ReportResponse:
         data.get("answer_coaching"),
         req.transcript,
     )
+    answer_coaching = _filter_reference_answers_by_language(
+        req.language,
+        answer_coaching,
+    )
     answer_coaching = _repair_missing_reference_answers(
         req,
         answer_coaching,
@@ -864,6 +904,7 @@ def build_report(req: ReportRequest) -> ReportResponse:
                 if isinstance(raw_speech_feedback, str)
                 else ""
             ),
+            language=req.language,
         )
 
     content_feedback = str(

@@ -12,6 +12,10 @@ _SOURCE_TERM_RULE = """
 그대로 유지하세요. 한국어 번역어·음역어·의역어로 바꾸지 마세요.
 예를 들어 슬라이드의 "intention lock mode"를 임의로
 "의도 잠금 모드"로 바꾸지 마세요.
+사용자에게 보이는 내용·전달·질의응답 피드백과 답변 구조 조언은
+자기완결적인 한국어 설명으로 작성하세요. 원문 문장·조건식·식별자·기호를
+그대로 붙여 넣어 평가를 대신하지 마세요. 원문 용어가 꼭 필요할 때만
+표기를 유지하고, 그 용어가 문맥에서 어떤 역할을 하는지 한국어로 설명하세요.
 """
 
 _REVISION_ACTION_GUIDE = """
@@ -101,6 +105,7 @@ def _format_transcript(
 
 def _build_speech_rule(
     speech_context: str,
+    language: str = "ko",
 ) -> str:
     """음성 지표 유무에 따른 출력 제한 규칙 생성."""
     if not speech_context.strip():
@@ -112,12 +117,13 @@ def _build_speech_rule(
             "speech_delivery_feedback은 빈 문자열로 작성하세요."
         )
 
+    filler_examples = "um·uh·erm·hmm" if language == "en" else "음·어"
     return (
         "[음성 답변 코칭 규칙]\n"
         "speech_delivery_feedback은 [검증된 음성 지표]의 판정만 "
         "근거로 작성하세요. 제공되지 않은 억양, 피치, 단어별 강세, "
         "자신감, 긴장, 감정 상태를 추측하지 마세요. "
-        "음·어처럼 말 사이를 채운 소리의 수는 실제 총횟수가 아니라 "
+        f"{filler_examples}처럼 말 사이를 채운 소리의 수는 실제 총횟수가 아니라 "
         "명확히 인식된 최소 횟수입니다. "
         "새 수치를 만들거나 기존 수치를 바꾸지 마세요. "
         "리포트 화면에 수치가 따로 표시되므로 수치를 반복하지 말고 "
@@ -174,14 +180,24 @@ def build_report_prompt(
     transcript: List[TranscriptTurn],
     *,
     speech_context: str = "",
+    language: str = "ko",
 ):
     """텍스트 자료와 검증된 음성 신호 기반 종합 리포트 생성."""
     has_script = bool(script.strip())
     has_slides = bool(slides)
-    speech_rule = _build_speech_rule(speech_context)
+    speech_rule = _build_speech_rule(speech_context, language)
     material_rule = _build_material_rule(
         has_script=has_script,
         has_slides=has_slides,
+    )
+    output_language_rule = (
+        "Write all report analysis, feedback, coaching, revision guidance, examples, missing-point explanations, "
+        "and answer_structure_tip in natural Korean. Preserve submitted wording in observation fields and keep "
+        "English technical terms exact only when needed for the explanation. Do not use raw source sentences, "
+        "formulas, or unexplained notation as user-facing feedback. Only answer_coaching.reference_answer must be written "
+        "in natural English."
+        if language == "en"
+        else "사용자에게 보이는 리포트 내용은 자연스러운 한국어로 작성하세요."
     )
 
     system = (
@@ -190,6 +206,7 @@ def build_report_prompt(
         f"{_SOURCE_TERM_RULE}\n"
         f"{material_rule}\n\n"
         f"{speech_rule}\n\n"
+        f"[출력 언어]\n{output_language_rule}\n\n"
         f"{_REVISION_ACTION_GUIDE}\n"
         "[답변별 참고 답변 규칙]\n"
         "answer_coaching은 질의응답 기록의 각 질문 슬롯에 대해 작성하세요.\n"
@@ -210,7 +227,7 @@ def build_report_prompt(
         "response_feedback은 원질문과 쉬운 재질문을 포함한 질의응답 기록에서 "
         "질문 이해, 직접성, 근거 제시, 재학습 필요 항목을 요약하세요.\n"
         "content_feedback, delivery_feedback, response_feedback은 "
-        "각각 한국어 2문장 이내로 작성하세요.\n"
+        "각각 출력 언어에 맞춰 2문장 이내로 작성하세요.\n"
         "질의응답 답변을 발표 대본으로 간주하지 마세요.\n"
         "answer_structure_tip은 질의응답 기록을 바탕으로 "
         "결론→근거→한계 또는 예외 순서의 답변 습관을 2~3문장으로 작성하세요.\n"
@@ -261,14 +278,16 @@ def build_speech_coaching_prompt(
     speech_context: str,
     *,
     draft: str = "",
+    language: str = "ko",
 ):
     """품질이 낮은 음성 코칭을 실제 답변 맥락에 맞춰 다시 생성."""
+    language_rule = "결과는 정확히 한국어 두 문장이어야 합니다."
     system = (
         "발표 질의응답의 음성 코칭 문구 하나만 작성하세요. "
         "검증된 음성 지표와 실제 질의응답 전사만 근거로 삼고, 제공되지 않은 "
         "억양, 피치, 강세, 자신감, 긴장, 감정 상태를 추측하지 마세요. "
         "화면에 별도로 표시되는 횟수와 속도 수치를 반복하지 마세요. "
-        "결과는 정확히 한국어 두 문장이어야 합니다. 첫 문장은 측정된 말하기 경향을 "
+        f"{language_rule} 첫 문장은 측정된 말하기 경향을 "
         "발표자가 바로 이해할 수 있는 일상어로 설명하세요. 두 번째 문장은 실제 답변 "
         "흐름과 함께 나타난 신호를 바탕으로 다음 답변의 어느 시점에 어떤 행동을 할지 "
         "구체적으로 제안하세요. 사용자에게 보이는 문장에는 '필러'라는 용어를 쓰지 말고, "

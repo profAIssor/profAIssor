@@ -8,6 +8,7 @@ import type {
   QuestionRole,
   QuestionType,
   Report,
+  SparringLanguage,
   Slide,
   SlideExtractResponse,
   TranscriptTurn,
@@ -301,6 +302,7 @@ export function fetchQuestion(
   personaId: PersonaId,
   difficulty: Difficulty,
   field: AcademicField | null,
+  language: SparringLanguage,
   excludedQuestions: string[] = [],
 ): Promise<QuestionResponse> {
   return post(
@@ -311,6 +313,7 @@ export function fetchQuestion(
       persona_id: personaId,
       difficulty,
       field,
+      language,
       excluded_questions: excludedQuestions,
     },
     QUESTION_REQUEST_TIMEOUT_MS,
@@ -335,6 +338,7 @@ export function evaluateAnswer(args: {
   maxTurns: number
   difficulty: Difficulty
   field: AcademicField | null
+  language: SparringLanguage
   termHints?: string[]
 }): Promise<EvaluateResponse> {
   return post(
@@ -357,6 +361,7 @@ export function evaluateAnswer(args: {
       max_turns: args.maxTurns,
       difficulty: args.difficulty,
       field: args.field,
+      language: args.language,
       term_hints: args.termHints ?? [],
       is_unknown_retry:
         args.questionRole === 'retry',
@@ -371,6 +376,7 @@ export function fetchReport(
   slides: Slide[],
   transcript: TranscriptTurn[],
   field: AcademicField | null,
+  language: SparringLanguage,
 ): Promise<Report> {
   return post(
     '/api/report',
@@ -379,6 +385,7 @@ export function fetchReport(
       slides,
       transcript,
       field,
+      language,
     },
     REPORT_REQUEST_TIMEOUT_MS,
   )

@@ -5,6 +5,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 Difficulty = Literal["easy", "medium", "hard"]
+SparringLanguage = Literal["ko", "en"]
 AcademicField = Literal["engineering", "humanities", "natural"]
 QuestionType = Literal[
     "evidence",
@@ -59,6 +60,7 @@ class QuestionRequest(BaseModel):
     slides: List[Slide] = Field(default_factory=list)
     persona_id: str
     difficulty: Difficulty = "medium"
+    language: SparringLanguage = "ko"
     field: Optional[AcademicField] = None
     excluded_questions: List[str] = Field(default_factory=list)
 
@@ -99,6 +101,7 @@ class EvaluateRequest(BaseModel):
     # 최초 질문 이후 허용되는 추가 질문 수
     max_turns: int = Field(default=2, ge=0, le=3)
     difficulty: Difficulty = "medium"
+    language: SparringLanguage = "ko"
     field: Optional[AcademicField] = None
     term_hints: List[str] = Field(default_factory=list)
     # 이전 프론트엔드 요청 호환용 재질문 표시
@@ -274,6 +277,7 @@ class ReportRequest(BaseModel):
     slides: List[Slide] = Field(default_factory=list)
     transcript: List[TranscriptTurn] = Field(default_factory=list)
     field: Optional[AcademicField] = None
+    language: SparringLanguage = "ko"
 
 
 class SlideCoverage(BaseModel):

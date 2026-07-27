@@ -118,7 +118,8 @@ const MAX_ALTERNATIVES = 3
 const CONTEXT_PHRASE_BOOST = 4.0
 const FILLER_PHRASE_BOOST = 3.0
 const ALTERNATIVE_CONFIDENCE_MARGIN = 0.03
-const FILLER_BIAS_PHRASES = ['어', '음', '으음'] as const
+const KOREAN_FILLER_BIAS_PHRASES = ['어', '음', '으음'] as const
+const ENGLISH_FILLER_BIAS_PHRASES = ['um', 'uh', 'erm', 'hmm'] as const
 
 const ERROR_MESSAGES: Record<string, string> = {
   'not-allowed':
@@ -129,6 +130,17 @@ const ERROR_MESSAGES: Record<string, string> = {
     '마이크를 찾을 수 없습니다. 마이크가 연결되어 있는지 확인해 주세요.',
   network:
     '음성 인식 서비스에 연결할 수 없습니다. 네트워크 상태를 확인해 주세요.',
+}
+
+const ENGLISH_ERROR_MESSAGES: Record<string, string> = {
+  'not-allowed':
+    'Microphone access is blocked. Allow microphone access from the icon in the Chrome address bar.',
+  'service-not-allowed':
+    'Microphone access is blocked. Allow microphone access from the icon in the Chrome address bar.',
+  'audio-capture':
+    'No microphone was found. Check that a microphone is connected.',
+  network:
+    'The speech recognition service is unavailable. Check your network connection.',
 }
 
 function normalizeForMatch(text: string): string {
@@ -341,6 +353,9 @@ export function useSpeechRecognition({
     }
 
     const browserWindow = window as BrowserWindow
+    const fillerBiasPhrases = lang.toLowerCase().startsWith('en')
+      ? ENGLISH_FILLER_BIAS_PHRASES
+      : KOREAN_FILLER_BIAS_PHRASES
     const PhraseConstructor =
       browserWindow.SpeechRecognitionPhrase
     if (
@@ -357,7 +372,7 @@ export function useSpeechRecognition({
                 CONTEXT_PHRASE_BOOST,
               ),
           ),
-          ...FILLER_BIAS_PHRASES.map(
+          ...fillerBiasPhrases.map(
             (phrase) =>
               new PhraseConstructor(
                 phrase,
@@ -465,7 +480,9 @@ export function useSpeechRecognition({
         shouldListenRef.current = false
       }
 
-      const message = ERROR_MESSAGES[event.error]
+      const message = lang.toLowerCase().startsWith('en')
+        ? ENGLISH_ERROR_MESSAGES[event.error]
+        : ERROR_MESSAGES[event.error]
       if (message) setMicError(message)
     }
 

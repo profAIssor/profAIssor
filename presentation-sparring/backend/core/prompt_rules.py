@@ -10,3 +10,16 @@ SOURCE_TERM_PRESERVATION = (
     "question_focus, expected_answer_points, supplement, retry_question, "
     "followup에도 같은 규칙을 적용하세요."
 )
+
+
+def get_source_term_preservation(language: str = "ko") -> str:
+    """세션 언어에 맞춰 원문 용어 보존과 출력 언어를 함께 고정합니다."""
+    if language == "en":
+        return (
+            "\n\n[Source terminology and output language]\n"
+            "Preserve the spelling and capitalization of technical terms, protocol names, modes, algorithms, "
+            "APIs, standards, abbreviations, code, and formulas exactly as written in the script or slides. "
+            "Write questions, retry questions, and follow-up questions in natural English. "
+            "For feedback, hints, explanations, and coaching, follow the field-specific output-language rule."
+        )
+    return SOURCE_TERM_PRESERVATION

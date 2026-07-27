@@ -2,14 +2,14 @@
 
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import HTTPException
 
 import llm_client
 import material_context
 import prompts
-from core.prompt_rules import SOURCE_TERM_PRESERVATION
+from core.prompt_rules import get_source_term_preservation
 from personas import (
     get_allowed_question_types,
     get_field_hint,
@@ -138,48 +138,31 @@ def _should_ask_followup(
     return True
 
 
-_NO_ANSWER_PATTERN = re.compile(
-    r"^(?:(?:잘|정확히|아직)\s*)?"
-    r"(?:모르겠습니다|모르겠어요|모르겠네요|모릅니다|모르겠다|"
-    r"기억(?:이\s*)?나지\s*않습니다|생각(?:이\s*)?나지\s*않습니다|"
-    r"답변하기\s*어렵습니다|확인해\s*봐야\s*합니다|검색해\s*봐야\s*합니다)"
-    r"(?:[\s,.!?…]*(?:먼저\s*)?(?:알려|설명해)\s*주(?:시)?겠습니까|"
-    r"[\s,.!?…]*(?:알려|설명해)\s*주세요)?[\s.!?…]*$",
-    re.IGNORECASE,
-)
-
-
-def _is_no_answer(answer: str) -> bool:
-    """명시적인 답변 불가 표현만 보수적으로 감지합니다."""
-    normalized = re.sub(r"\s+", " ", answer.strip())
-    if not normalized or len(normalized) > 100:
-        return False
-
-    compact = re.sub(r"[\s,.!?…]", "", normalized.lower())
-    if compact in {
-        "모름",
-        "잘모름",
-        "모르겠습니다",
-        "잘모르겠습니다",
-        "모르겠어요",
-        "잘모르겠어요",
-        "모릅니다",
-        "idontknow",
-    }:
-        return True
-
-    return bool(_NO_ANSWER_PATTERN.fullmatch(normalized))
-
-
 def _next_action_after_current_question(req: EvaluateRequest) -> str:
     """현재 질문 슬롯 종료 뒤 다음 기본 질문 또는 전체 종료 결정."""
     return "move_to_new_root" if req.turn < req.max_turns else "finish"
 
 
-def _fallback_supplement(question_focus: str, current_type: QuestionType) -> str:
+def _fallback_supplement(
+    question_focus: str,
+    current_type: QuestionType,
+    language: str = "ko",
+) -> str:
     """모델 보충 설명 누락 시 사용할 사고 방향 안내."""
     focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
     subject = focus or "현재 질문의 핵심 개념"
+    if language == "en":
+        english_subject = focus or "the key concept in this question"
+        english_guides: Dict[QuestionType, str] = {
+            "definition": "Start by identifying what role it plays and how it differs from a similar concept.",
+            "evidence": "Find one fact, result, or relationship in the presentation that connects the cause to the conclusion.",
+            "counterexample": "Consider which changed condition would make the result different.",
+            "application": "First identify one decision criterion from the original explanation that can be applied here.",
+        }
+        return (
+            f"This question asks you to explain {english_subject}. "
+            f"{english_guides[current_type]}"
+        )
     type_guides: Dict[QuestionType, str] = {
         "definition": (
             "익숙한 용어를 그대로 반복하기보다, 그 개념이 어떤 역할을 하고 "
@@ -204,10 +187,36 @@ def _fallback_supplement(question_focus: str, current_type: QuestionType) -> str
 def _fallback_unknown_retry(
     question_focus: str,
     current_type: QuestionType,
+    language: str = "ko",
 ) -> tuple[str, str, List[str]]:
     """현재 질문의 사고 단계를 한 단계 낮춘 재질문 계약 생성."""
     focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
     subject = focus or "현재 질문의 핵심 내용"
+    if language == "en":
+        english_subject = focus or "the key point of the question"
+        english_templates: Dict[QuestionType, tuple[str, str, List[str]]] = {
+            "definition": (
+                f"Could you first explain one role that {english_subject} plays?",
+                f"Core role of {english_subject}",
+                ["One role of the concept", "One feature that distinguishes it from a similar concept"],
+            ),
+            "evidence": (
+                f"What is one clue in the presentation that connects the cause and result for {english_subject}?",
+                f"Evidence connecting cause and result for {english_subject}",
+                ["One piece of evidence from the presentation", "Why that evidence supports the conclusion"],
+            ),
+            "counterexample": (
+                f"What is one condition under which the explanation of {english_subject} could change?",
+                f"Condition that changes {english_subject}",
+                ["One condition that could change the explanation", "How the result changes under that condition"],
+            ),
+            "application": (
+                f"What is one criterion you could use when applying {english_subject}?",
+                f"Decision criterion for applying {english_subject}",
+                ["One criterion from the original explanation", "Why that criterion applies to this situation"],
+            ),
+        }
+        return english_templates[current_type]
     templates: Dict[QuestionType, tuple[str, str, List[str]]] = {
         "definition": (
             f"{subject}이 실제로 하는 역할 한 가지를 먼저 설명해 주실 수 있나요?",
@@ -247,6 +256,11 @@ def _is_trivial_definition_retry(question: str, current_type: QuestionType) -> b
             r".{1,60}(?:의\s*)?(?:뜻|정의)는\s*무엇인가요[?？]?",
             normalized,
         )
+        or re.fullmatch(
+            r"(?i)(?:what\s+is|what\s+does)\s+.{1,100}(?:mean|do)\??",
+            normalized,
+        )
+        or re.fullmatch(r"(?i)define\s+.{1,100}\.?", normalized)
     )
 
 
@@ -270,6 +284,15 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
     ) or "- 현재 질문에서 확인하려던 핵심 요소 한 가지"
     source_question = req.question.strip()
     focus = req.question_focus.strip() or source_question[:160]
+    output_language_rule = (
+        "Write supplement, retry_question, retry_focus, and retry_expected_answer_points in natural English. "
+        "Set retry_speech_term_aliases to an empty array."
+        if req.language == "en"
+        else (
+            "학생에게 보이는 내용은 자연스러운 한국어로 작성하세요. "
+            "retry_speech_term_aliases에는 영문 기술 용어의 ko-KR 발음 후보만 넣으세요."
+        )
+    )
 
     system = (
         "당신은 발표 질의응답 연습을 돕는 평가자입니다. "
@@ -281,9 +304,7 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         "비정의형 질문을 단순한 용어 정의 질문으로 바꾸지 마세요. "
         "관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요. "
         "retry_focus와 retry_expected_answer_points는 재질문 자체만 평가할 수 있도록 새로 작성하세요. "
-        "retry_speech_term_aliases는 retry_question에 새로 등장한 영문 기술 용어만 포함하며, "
-        "aliases는 뜻이 아니라 영문 단어 경계를 유지한 ko-KR 발음·흔한 STT 변형 1~3개입니다. "
-        "없으면 빈 배열로 두세요. "
+        f"{output_language_rule} "
         'JSON만 반환: {"supplement":"<사고 지원 설명>","retry_question":"<재질문>",'
         '"retry_focus":"<재질문의 평가 초점>","retry_expected_answer_points":["<요소1>","<요소2>"],'
         '"retry_speech_term_aliases":[{"canonical":"<원문 영문 용어>",'
@@ -325,12 +346,13 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
     fallback_question, fallback_focus, fallback_points = _fallback_unknown_retry(
         focus,
         current_type,
+        req.language,
     )
     supplement_raw = data.get("supplement")
     supplement = (
         supplement_raw.strip()
         if isinstance(supplement_raw, str) and supplement_raw.strip()
-        else _fallback_supplement(focus, current_type)
+        else _fallback_supplement(focus, current_type, req.language)
     )
     retry_raw = data.get("retry_question")
     retry_question = retry_raw.strip() if isinstance(retry_raw, str) else ""
@@ -357,9 +379,13 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
             *[slide.text for slide in selected_slides[:3]],
         ]
     )
-    retry_speech_term_aliases = _parse_speech_term_aliases(
-        data.get("retry_speech_term_aliases"),
-        source_text=retry_alias_source,
+    retry_speech_term_aliases = (
+        []
+        if req.language == "en"
+        else _parse_speech_term_aliases(
+            data.get("retry_speech_term_aliases"),
+            source_text=retry_alias_source,
+        )
     )
 
     return EvaluateResponse(
@@ -395,6 +421,18 @@ def _fallback_unknown_closure(
         or req.question
     )
     focus = re.sub(r"\s+", " ", focus).strip()[:180]
+
+    if req.language == "en":
+        if points:
+            joined = ", ".join(points)
+            return (
+                f"The key points for this question are {joined}. Review the definition and role of "
+                f"{focus or 'the key concept'}, and the relationship explicitly requested by the question."
+            )
+        return (
+            f"This question checks your understanding of {focus or 'the relevant key concept'}. "
+            "Review its definition, role, and relationship to the other concepts on the relevant slides."
+        )
 
     if points:
         joined = ", ".join(points)
@@ -433,6 +471,11 @@ def _build_unknown_closure(
         for point in req.expected_answer_points[:3]
         if point.strip()
     ) or "- 질문에서 확인하려던 핵심 개념과 역할"
+    output_language_rule = (
+        "Write supplement in clear, natural English."
+        if req.language == "en"
+        else "supplement는 자연스러운 한국어로 작성하세요."
+    )
 
     system = (
         "당신은 발표 질의응답 학습을 마무리하는 설명자입니다. "
@@ -444,6 +487,7 @@ def _build_unknown_closure(
         "자료에 없는 사실은 만들지 마세요. "
         "영문 기술 용어, 프로토콜명, 모드명, 알고리즘명, 약어는 "
         "슬라이드 원문 그대로 유지하고 한국어로 번역하지 마세요. "
+        f"{output_language_rule} "
         'JSON만 반환: {"supplement":"<개념 설명>",'
         '"related_slides":[<번호 1~3개>]}.'
     )
@@ -495,9 +539,7 @@ def _build_unknown_closure(
         answer_status="unknown",
         verdict="확인 필요",
         strengths="",
-        gaps=(
-            "이 질문과 관련된 개념을 발표 전에 다시 학습해 주세요."
-        ),
+        gaps="이 질문과 관련된 개념을 발표 전에 다시 학습해 주세요.",
         supplement=supplement,
         related_slides=related_slides,
         next_action=_next_action_after_current_question(req),
@@ -740,6 +782,66 @@ def _gap_targets_covered_expected_point(
     )
 
 
+def _rewrite_gap_as_user_feedback(
+    req: EvaluateRequest,
+    uncovered_indices: List[int],
+) -> Optional[str]:
+    """내부 기대 요소를 사용자용 한국어 보완 설명으로 다시 작성합니다."""
+    if not uncovered_indices:
+        return None
+
+    prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
+    selected_slides = material_context.select_context_slides(
+        prompt_slides,
+        req.context_slides,
+        query=req.question_focus or req.question,
+    )
+    slide_context = "\n\n".join(
+        f"[슬라이드 {slide.index}]\n{slide.text[:1200]}"
+        for slide in selected_slides[:3]
+    ) or "(관련 슬라이드 없음)"
+    missing_points = "\n".join(
+        f"- {req.expected_answer_points[index]}"
+        for index in uncovered_indices
+        if 0 <= index < len(req.expected_answer_points)
+        and req.expected_answer_points[index].strip()
+    )
+    if not missing_points:
+        return None
+
+    system = (
+        "당신은 발표 질의응답의 사용자용 보완 설명을 작성합니다. 질문, 학생 답변, "
+        "내부 평가 요소, 관련 슬라이드를 근거로 부족한 핵심 한 가지를 자연스러운 "
+        "한국어 1~2문장으로 설명하세요. 사용자가 별도 자료를 보지 않아도 이해할 수 "
+        "있어야 합니다. 내부 평가 요소나 슬라이드의 원문 문장, 조건식, 식별자, 기호를 "
+        "그대로 복사해 붙이지 마세요. 기술 용어·고유 명칭은 꼭 필요할 때만 원문 표기를 "
+        "유지하고, 그 용어의 역할이나 빠진 관계를 한국어로 설명하세요. 문맥으로 역할을 "
+        "확정할 수 없는 표기는 사용하지 마세요. 자료에 없는 사실을 추가하지 마세요. "
+        'JSON만 반환: {"gaps":"<자기완결적인 한국어 보완 설명>"}.'
+    )
+    user = (
+        f"[질문]\n{req.question[:700]}\n\n"
+        f"[학생 답변]\n{req.answer[:1800]}\n\n"
+        f"[내부 미충족 요소]\n{missing_points}\n\n"
+        f"[관련 발표 자료]\n{slide_context}"
+    )
+    try:
+        data = llm_client.chat_json(
+            system,
+            user,
+            get_model_hint(req.persona_id),
+            kind="evaluate",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("User-facing gap rewrite failed")
+        return None
+
+    rewritten = data.get("gaps")
+    if not isinstance(rewritten, str):
+        return None
+    return rewritten.strip()[:600] or None
+
+
 def _normalize_semantic_consistency(
     req: EvaluateRequest,
     evaluation_data: dict,
@@ -750,21 +852,62 @@ def _normalize_semantic_consistency(
         req.expected_answer_points,
         req.answer,
     )
-    raw_gap = str(evaluation_data.get("gaps", "")).strip()
-    if not _gap_targets_covered_expected_point(
-        req,
-        raw_gap,
-        point_assessments,
-    ):
-        return evaluation_data
+    out_of_scope_indices = {
+        index
+        for index in evaluation_data.get(
+            "_out_of_scope_expected_point_indices",
+            [],
+        )
+        if isinstance(index, int)
+        and not isinstance(index, bool)
+        and 0 <= index < len(req.expected_answer_points)
+    }
+    effective_assessments = dict(point_assessments)
+    for index in out_of_scope_indices:
+        if index in effective_assessments:
+            effective_assessments[index] = True
 
     displayed_indices = [
         index
         for index, point in enumerate(req.expected_answer_points)
         if point.strip()
     ][:3]
+    required_indices = [
+        index
+        for index in displayed_indices
+        if index not in out_of_scope_indices
+    ]
+    if (
+        out_of_scope_indices
+        and all(
+            effective_assessments.get(index) is True
+            for index in required_indices
+        )
+    ):
+        normalized = dict(evaluation_data)
+        normalized["verdict"] = "충분"
+        normalized["gaps"] = "없음"
+        if not str(normalized.get("strengths", "")).strip():
+            normalized["strengths"] = (
+                "질문에서 요구한 핵심 요소를 자신의 말로 설명했습니다."
+            )
+        rubric = _parse_rubric(normalized.get("rubric"))
+        for axis in _RUBRIC_AXES:
+            if rubric.get(axis) in {None, "부족"}:
+                rubric[axis] = "보통"
+        normalized["rubric"] = rubric
+        return normalized
+
+    raw_gap = str(evaluation_data.get("gaps", "")).strip()
+    if not _gap_targets_covered_expected_point(
+        req,
+        raw_gap,
+        effective_assessments,
+    ):
+        return evaluation_data
+
     if not displayed_indices or any(
-        index not in point_assessments
+        index not in effective_assessments
         for index in displayed_indices
     ):
         return evaluation_data
@@ -773,7 +916,7 @@ def _normalize_semantic_consistency(
     uncovered_indices = [
         index
         for index in displayed_indices
-        if point_assessments.get(index) is False
+        if effective_assessments.get(index) is False
     ]
     verdict = str(normalized.get("verdict", "")).strip()
 
@@ -784,14 +927,10 @@ def _normalize_semantic_consistency(
         return normalized
 
     if uncovered_indices:
-        missing_point = _clean_single_focus(
-            req.expected_answer_points[uncovered_indices[0]]
-        )
         normalized["verdict"] = "부분 충족"
         normalized["gaps"] = (
-            f"다음 핵심 요소를 더 분명히 설명해 주세요: {missing_point}"
-            if missing_point
-            else "질문의 남은 핵심 요소 한 가지를 더 분명히 설명해 주세요."
+            _rewrite_gap_as_user_feedback(req, uncovered_indices)
+            or "질문에서 요구한 핵심 조건 중 답변에 드러나지 않은 부분을 더 분명히 설명해 주세요."
         )
         if not str(normalized.get("strengths", "")).strip():
             normalized["strengths"] = (
@@ -816,6 +955,141 @@ def _normalize_semantic_consistency(
         if rubric.get(axis) in {None, "부족"}:
             rubric[axis] = "보통"
     normalized["rubric"] = rubric
+    return normalized
+
+
+def _audit_uncovered_expected_points(
+    req: EvaluateRequest,
+    evaluation_data: dict,
+) -> dict:
+    """최초 평가가 놓친 바꿔 말하기·작동 설명의 의미 충족 여부를 재검증합니다."""
+    initial_assessments = _parse_expected_point_assessments(
+        evaluation_data.get("expected_point_assessments"),
+        req.expected_answer_points,
+        req.answer,
+    )
+    uncovered_indices = [
+        index
+        for index, point in enumerate(req.expected_answer_points)
+        if point.strip() and initial_assessments.get(index) is False
+    ][:3]
+    if not uncovered_indices:
+        return evaluation_data
+
+    prompt_slides = material_context.build_prompt_slides(
+        req.script,
+        req.slides,
+    )
+    selected_slides = material_context.select_context_slides(
+        prompt_slides,
+        req.context_slides,
+        query=req.question_focus or req.question,
+    )
+    slide_context = "\n\n".join(
+        f"[슬라이드 {slide.index}]\n{slide.text[:1400]}"
+        for slide in selected_slides[:3]
+    ) or "(관련 슬라이드 없음)"
+    points = "\n".join(
+        f"- point_index {index}: {req.expected_answer_points[index]}"
+        for index in uncovered_indices
+    )
+
+    system = (
+        "당신은 발표 답변의 의미 동등성만 독립적으로 재검증하는 판정자입니다. "
+        "최초 평가가 미충족으로 본 요소만 확인하세요. 먼저 해당 요소가 직전 질문에서 "
+        "명시적으로 요구된 필수 답변인지 판단하세요. 발표 자료에 관련 내용이 있다는 이유만으로 "
+        "질문이 묻지 않은 배경·장애 유형·장점·절차를 필수로 만들지 마세요. "
+        "질문의 범위를 벗어나면 required_by_question=false입니다. "
+        "필수 요소라면 정확한 문구 일치를 요구하지 마세요. "
+        "학생이 표준 개념이나 방법을 이름으로 말하고 그 작동 방식·결과·구체적 상황을 설명하여 "
+        "기대 요소를 논리적으로 함의했다면 covered=true입니다. 같은 단어만 등장했거나 "
+        "여러 해석이 가능하면 covered=false입니다. 발음이 깨진 STT 전사는 질문과 자료에서 "
+        "하나의 원문 용어로 확정될 때만 복원하세요. 학생이 말하지 않은 내용을 보태지 마세요. "
+        "covered=true인 answer_evidence는 학생 답변에서 공백까지 그대로 복사한 짧은 연속 구절이어야 "
+        "하고, covered=false이면 빈 문자열이어야 합니다. "
+        'JSON만 반환: {"expected_point_assessments": ['
+        '{"point_index": <번호>, "required_by_question": <true|false>, '
+        '"covered": <true|false>, '
+        '"answer_evidence": "<학생 답변의 연속 원문 또는 빈 문자열>"}]}.'
+    )
+    user = (
+        f"[질문]\n{req.question}\n\n"
+        f"[학생 답변 원문]\n{req.answer}\n\n"
+        f"[재검증할 기대 요소]\n{points}\n\n"
+        f"[관련 발표 자료]\n{slide_context}"
+    )
+
+    try:
+        audit_data = llm_client.chat_json(
+            system,
+            user,
+            get_model_hint(req.persona_id),
+            kind="evaluate",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Semantic coverage audit failed; initial evaluation retained"
+        )
+        return evaluation_data
+
+    def item_index(item: dict) -> Optional[int]:
+        value = item.get("point_index")
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    audited = _parse_expected_point_assessments(
+        audit_data.get("expected_point_assessments"),
+        req.expected_answer_points,
+        req.answer,
+    )
+    raw_audit_items = audit_data.get("expected_point_assessments")
+    out_of_scope_indices = {
+        index
+        for item in raw_audit_items
+        if isinstance(item, dict)
+        and item.get("required_by_question") is False
+        and (index := item_index(item)) in uncovered_indices
+    } if isinstance(raw_audit_items, list) else set()
+    newly_covered = {
+        index
+        for index in uncovered_indices
+        if audited.get(index) is True
+    }
+    if not newly_covered and not out_of_scope_indices:
+        return evaluation_data
+
+    original_items = evaluation_data.get("expected_point_assessments")
+    retained_items = [
+        item
+        for item in original_items
+        if isinstance(item, dict)
+        and item_index(item) not in newly_covered
+    ] if isinstance(original_items, list) else []
+    audited_items = [
+        item
+        for item in audit_data.get("expected_point_assessments", [])
+        if isinstance(item, dict)
+        and item_index(item) in newly_covered
+    ]
+
+    normalized = dict(evaluation_data)
+    normalized["expected_point_assessments"] = [
+        *retained_items,
+        *audited_items,
+    ]
+    existing_out_of_scope = normalized.get(
+        "_out_of_scope_expected_point_indices",
+        [],
+    )
+    normalized["_out_of_scope_expected_point_indices"] = sorted({
+        *(
+            index
+            for index in existing_out_of_scope
+            if isinstance(index, int) and not isinstance(index, bool)
+        ),
+        *out_of_scope_indices,
+    })
     return normalized
 
 
@@ -997,6 +1271,11 @@ def _question_addresses_gap(
     return bool(question_tokens & gap_tokens)
 
 
+def _contains_hangul(text: str) -> bool:
+    """영문 질문 계약을 깨는 한글 포함 여부."""
+    return bool(re.search(r"[가-힣]", text or ""))
+
+
 def _natural_followup_subject(
     req: EvaluateRequest,
     gap_focus: str,
@@ -1037,6 +1316,21 @@ def _fallback_gap_followup(
     """실제 발표 현장처럼 단일 보완점을 자연스럽게 묻는 폴백 생성."""
     concise_gap = _clean_single_focus(gap_focus)[:90]
     subject = _natural_followup_subject(req, concise_gap)
+
+    if req.language == "en":
+        english_subject = subject or "the main claim"
+        english_questions: Dict[QuestionType, str] = {
+            "evidence": f"Why does {concise_gap} support {english_subject}?",
+            "application": f"How would you apply {concise_gap} to {english_subject}?",
+            "counterexample": f"Under what condition might {concise_gap} not hold for {english_subject}?",
+            "definition": f"What role does {concise_gap} play in {english_subject}?",
+        }
+        return (
+            english_questions[current_type],
+            current_type,
+            concise_gap,
+            [concise_gap],
+        )
 
     if current_type == "evidence":
         if subject:
@@ -1095,11 +1389,41 @@ def _fallback_gap_followup(
 def _fallback_required_followup(
     question_focus: str,
     current_type: QuestionType,
+    language: str = "ko",
 ) -> tuple[str, QuestionType, str, List[str]]:
     """정상 답변 이후 심화·확장용 꼬리질문 계약 생성."""
     focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
     subject = focus or "앞선 답변의 핵심 내용"
     next_type = _TYPE_TRANSITIONS[current_type]
+    if language == "en":
+        english_subject = focus or "the main point of your previous answer"
+        english_templates: Dict[QuestionType, tuple[str, QuestionType, str, List[str]]] = {
+            "definition": (
+                f"Could you give one example from the presentation that demonstrates {english_subject}?",
+                "application",
+                f"Example demonstrating {english_subject}",
+                ["One example connected to the definition", "Why the example demonstrates the concept"],
+            ),
+            "evidence": (
+                "Under what condition could the evidence you just gave become weaker or lead to a different conclusion?",
+                "counterexample",
+                f"Condition that weakens the evidence for {english_subject}",
+                ["One condition that weakens the evidence", "How the conclusion changes under that condition"],
+            ),
+            "counterexample": (
+                "What could be done to reduce or address the exception you just described?",
+                "application",
+                f"Response to the exception for {english_subject}",
+                ["One way to address the exception", "Why that approach would work"],
+            ),
+            "application": (
+                "What evidence from the presentation supports the application you just proposed?",
+                "evidence",
+                f"Evidence supporting the application of {english_subject}",
+                ["Evidence from the presentation", "How the evidence supports the proposed application"],
+            ),
+        }
+        return english_templates[current_type]
     templates: Dict[QuestionType, tuple[str, QuestionType, str, List[str]]] = {
         "definition": (
             f"방금 설명한 {subject}이 실제 발표 사례에서 어떻게 드러나는지 한 가지 예로 설명해 주실 수 있나요?",
@@ -1166,6 +1490,19 @@ def _build_followup(
     else:
         gap_focus = _extract_gap_focus(raw_gap)
 
+    if req.language == "en" and has_meaningful_gap:
+        # 한국어 평가 문구를 영문 꼬리질문에 직접 삽입하지 않습니다.
+        # 질문 생성 단계에서 이미 영어로 작성된 기대 요소를 우선 사용합니다.
+        gap_focus = next(
+            (
+                point.strip()
+                for index, point in enumerate(req.expected_answer_points)
+                if point.strip()
+                and point_assessments.get(index) is False
+            ),
+            req.question_focus.strip() or req.question.strip(),
+        )
+
     if has_meaningful_gap:
         (
             fallback_question,
@@ -1186,6 +1523,7 @@ def _build_followup(
         ) = _fallback_required_followup(
             req.question_focus,
             current_type,
+            req.language,
         )
     prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
     selected_slides = material_context.select_context_slides(
@@ -1229,6 +1567,16 @@ def _build_followup(
             "외부 사실을 단정하지 말고 자료 밖 확장은 가정형으로 표현하세요."
         ),
     }.get(req.difficulty, "")
+    output_language_rule = (
+        "Write followup, followup_focus, and followup_expected_answer_points in natural English. "
+        "Never copy Korean evaluation wording into those fields; use the English follow-up focus and source terms. "
+        "Set followup_speech_term_aliases to an empty array."
+        if req.language == "en"
+        else (
+            "학생에게 보이는 내용은 자연스러운 한국어로 작성하세요. "
+            "followup_speech_term_aliases에는 영문 기술 용어의 ko-KR 발음 후보만 넣으세요."
+        )
+    )
 
     system = (
         "당신은 발표 질의응답의 꼬리질문을 만드는 평가자입니다. "
@@ -1242,9 +1590,7 @@ def _build_followup(
         "가장 가치 있는 방향 하나를 선택하세요. "
         "질문은 발표 자료와 학생 답변으로 답할 수 있어야 하며, 한 문장에 요구를 하나만 포함하세요. "
         "관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요. "
-        "followup_speech_term_aliases는 followup에 새로 등장한 영문 기술 용어만 포함하며, "
-        "aliases는 뜻이 아니라 영문 단어 경계를 유지한 ko-KR 발음·흔한 STT 변형 1~3개입니다. "
-        "없으면 빈 배열로 두세요. "
+        f"{output_language_rule} "
         f"{followup_policy} "
         f"{difficulty_followup_rule} "
         'JSON만 반환: {"followup":"<꼬리질문>","followup_question_type":"<evidence|counterexample|application|definition>",'
@@ -1254,14 +1600,24 @@ def _build_followup(
     )
     if not has_meaningful_gap:
         gap_context = "(구체 보완점 없음)"
+    elif req.language == "en":
+        gap_context = (
+            "(The Korean evaluation text is intentionally omitted. "
+            "Use only the English follow-up focus below.)"
+        )
     elif req.difficulty == "medium":
         gap_context = "(보통 난이도에서는 선택된 단일 보완점만 사용)"
     else:
         gap_context = raw_gap
+    strengths_context = (
+        "(Korean evaluation text omitted)"
+        if req.language == "en"
+        else str(evaluation_data.get("strengths", "")).strip()
+    )
     user = (
         f"[기본 질문]\n{req.question}\n\n"
         f"[학생 답변]\n{req.answer}\n\n"
-        f"[평가 강점]\n{str(evaluation_data.get('strengths', '')).strip()}\n\n"
+        f"[평가 강점]\n{strengths_context}\n\n"
         f"[평가 보완점]\n{gap_context}\n\n"
         f"[후속 질문 핵심]\n{gap_focus or '(구체 보완점 없음)'}\n\n"
         f"[질문 초점]\n{req.question_focus}\n\n"
@@ -1286,6 +1642,10 @@ def _build_followup(
     followup = raw_question.strip() if isinstance(raw_question, str) else ""
     if (
         not followup
+        or (
+            req.language == "en"
+            and _contains_hangul(followup)
+        )
         or _is_duplicate_question(
             followup,
             [req.question, req.root_question or ""],
@@ -1342,6 +1702,12 @@ def _build_followup(
             data.get("followup_expected_answer_points"),
             limit=3,
         ) or fallback_points
+        if req.language == "en" and (
+            _contains_hangul(followup_focus)
+            or any(_contains_hangul(point) for point in followup_points)
+        ):
+            followup_focus = fallback_focus
+            followup_points = fallback_points
 
     followup_alias_source = "\n".join(
         [
@@ -1349,9 +1715,13 @@ def _build_followup(
             *[slide.text for slide in selected_slides[:3]],
         ]
     )
-    followup_speech_term_aliases = _parse_speech_term_aliases(
-        data.get("followup_speech_term_aliases"),
-        source_text=followup_alias_source,
+    followup_speech_term_aliases = (
+        []
+        if req.language == "en"
+        else _parse_speech_term_aliases(
+            data.get("followup_speech_term_aliases"),
+            source_text=followup_alias_source,
+        )
     )
 
     return (
@@ -1363,17 +1733,78 @@ def _build_followup(
     )
 
 
+def _fallback_substantive_evaluation(
+    req: EvaluateRequest,
+) -> dict:
+    """내용이 있는 답변을 모델이 무응답으로 오분류했을 때의 최소 평가."""
+    return {
+        "answer_status": "answered",
+        "verdict": "부족",
+        "strengths": "질문에 답하려고 관련 개념을 설명했습니다.",
+        "gaps": (
+            "답변은 제출했지만 질문에서 요구한 핵심과 직접 연결되는 내용을 "
+            "확인하기 어렵습니다."
+        ),
+        "expected_point_assessments": [
+            {
+                "point_index": index,
+                "covered": False,
+                "answer_evidence": "",
+            }
+            for index, point in enumerate(req.expected_answer_points[:3])
+            if point.strip()
+        ],
+        "rubric": {
+            "직접성": "부족",
+            "근거": "부족",
+            "논리": "부족",
+        },
+    }
+
+
+def _classify_no_answer_with_llm(
+    req: EvaluateRequest,
+) -> Optional[bool]:
+    """정오와 무관하게 실제 답변 시도 여부를 의미 단위로 판별합니다."""
+    system = (
+        "You classify the communicative intent of a presentation Q&A response. "
+        "Judge meaning, not exact wording, spelling, grammar, language, or answer correctness. "
+        "Use no_answer only when the speaker solely communicates inability, lack of knowledge, "
+        "or refusal and provides no factual claim, reasoning, mechanism, example, or attempted "
+        "answer. Use substantive_attempt whenever any answer content is attempted, even if it is "
+        "incorrect, incomplete, off-topic, hedged, or distorted by speech recognition. "
+        'Return JSON only: {"classification":"no_answer|substantive_attempt"}.'
+    )
+    user = (
+        f"[Question]\n{req.question[:700]}\n\n"
+        f"[Response]\n{req.answer[:1800]}"
+    )
+    try:
+        data = llm_client.chat_json(
+            system,
+            user,
+            get_model_hint(req.persona_id),
+            kind="evaluate",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("No-answer intent classification failed")
+        return None
+
+    classification = str(data.get("classification", "")).strip().lower()
+    if classification == "no_answer":
+        return True
+    if classification == "substantive_attempt":
+        return False
+
+    logger.warning(
+        "Unexpected no-answer classification: %r",
+        classification,
+    )
+    return None
+
+
 def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
     current_role = "retry" if req.is_unknown_retry else req.question_role
-    no_answer = _is_no_answer(req.answer)
-
-    # 무응답 재질문의 두 번째 무응답 종료
-    if current_role == "retry" and no_answer:
-        return _build_unknown_closure(req)
-
-    # 기본 질문 또는 꼬리질문의 최초 무응답 처리
-    if no_answer:
-        return _build_unknown_retry(req)
 
     persona = get_persona(req.persona_id)
     persona_system = (
@@ -1383,7 +1814,7 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
             req.persona_id,
             req.difficulty,
         )
-        + SOURCE_TERM_PRESERVATION
+        + get_source_term_preservation(req.language)
     )
     prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
     system, user = prompts.build_evaluate_prompt(
@@ -1400,6 +1831,7 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
         question_focus=req.question_focus,
         context_slides=req.context_slides,
         expected_answer_points=req.expected_answer_points,
+        language=req.language,
     )
     try:
         data = llm_client.chat_json(
@@ -1415,24 +1847,75 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
             detail="AI 평가 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
         )
 
-    # 정규식에서 놓친 무응답 뉘앙스의 모델 보조 판정
+    # 모델이 unknown으로 본 답변만 별도의 의미 판정으로 확인합니다.
+    # 표현 목록 없이 실제 답변 시도와 명시적 답변 포기를 구분합니다.
     model_status = str(data.get("answer_status", "")).strip().lower()
+    recovered_substantive_unknown = False
     if model_status == "unknown":
-        if current_role == "retry":
-            return _build_unknown_closure(req)
-        return _build_unknown_retry(req)
+        no_answer = _classify_no_answer_with_llm(req)
+        if no_answer is not False:
+            if current_role == "retry":
+                return _build_unknown_closure(req)
+            return _build_unknown_retry(req)
 
+        recovered_substantive_unknown = True
+        reinforced_system = (
+            system
+            + "\n\n[답변 상태 강제 규칙]\n"
+            "학생은 내용이 있는 답변을 제출했습니다. 정답과 다르거나 질문의 주제에서 "
+            "벗어났더라도 answer_status는 반드시 answered입니다. 그런 경우 verdict를 "
+            "'부족'으로 두고, strengths에는 실제로 시도한 부분만, gaps에는 질문과 "
+            "어긋난 핵심을 구체적으로 한국어로 설명하세요. unknown을 반환하지 마세요."
+        )
+        try:
+            data = llm_client.chat_json(
+                reinforced_system,
+                user,
+                get_model_hint(req.persona_id),
+                kind="evaluate",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Substantive answer re-evaluation failed; fallback used"
+            )
+            data = _fallback_substantive_evaluation(req)
+
+        if str(data.get("answer_status", "")).strip().lower() == "unknown":
+            data = _fallback_substantive_evaluation(req)
+
+    data = _audit_uncovered_expected_points(req, data)
     data = _normalize_semantic_consistency(req, data)
     data = _normalize_rubric_consistency(req, data)
+    concept_explanation: Optional[EvaluateResponse] = None
+    if (
+        recovered_substantive_unknown
+        and current_role == "retry"
+        and str(data.get("verdict", "")).strip() != "충분"
+    ):
+        concept_explanation = _build_unknown_closure(req)
     response_kwargs = dict(
         answer_status="answered",
         verdict=str(data.get("verdict", "")).strip(),
         strengths=str(data.get("strengths", "")).strip(),
         gaps=str(data.get("gaps", "")).strip(),
-        supplement=None,
-        related_slides=[],
+        supplement=(
+            concept_explanation.supplement
+            if concept_explanation
+            else None
+        ),
+        related_slides=(
+            concept_explanation.related_slides
+            if concept_explanation
+            else []
+        ),
         rubric=_parse_rubric(data.get("rubric")),
     )
+
+    if recovered_substantive_unknown and current_role == "retry":
+        return EvaluateResponse(
+            **response_kwargs,
+            next_action=_next_action_after_current_question(req),
+        )
 
     # 꼬리질문 답변 뒤에는 추가 꼬리질문 금지
     if current_role == "followup":

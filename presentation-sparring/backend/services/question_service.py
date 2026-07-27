@@ -11,7 +11,7 @@ from fastapi import HTTPException
 import llm_client
 import material_context
 import prompts
-from core.prompt_rules import SOURCE_TERM_PRESERVATION
+from core.prompt_rules import get_source_term_preservation
 from personas import (
     get_allowed_question_types,
     get_field_hint,
@@ -288,6 +288,18 @@ _QUESTION_STOPWORDS = {
     "대해서",
     "자료",
     "발표",
+    "what",
+    "how",
+    "why",
+    "could",
+    "would",
+    "please",
+    "explain",
+    "describe",
+    "presentation",
+    "the",
+    "and",
+    "from",
 }
 
 # 난이도는 질문의 깊이를 정하는 값이며, 이미 물은 질문을 다시 묻지 않는 기준과는 분리한다.
@@ -392,6 +404,7 @@ def _generate_question_data(
             difficulty=req.difficulty,
             question_type_priority=question_type_priority,
             excluded_questions=prompt_blocked_questions,
+            language=req.language,
         )
 
         if attempt > 0:
@@ -472,7 +485,7 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
             req.persona_id,
             req.difficulty,
         )
-        + SOURCE_TERM_PRESERVATION
+        + get_source_term_preservation(req.language)
     )
     question_type_priority = list(
         get_allowed_question_types(
@@ -537,9 +550,13 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
             ],
         ]
     )
-    speech_term_aliases = _parse_speech_term_aliases(
-        data.get("speech_term_aliases"),
-        source_text=context_source,
+    speech_term_aliases = (
+        []
+        if req.language == "en"
+        else _parse_speech_term_aliases(
+            data.get("speech_term_aliases"),
+            source_text=context_source,
+        )
     )
 
     return QuestionResponse(
