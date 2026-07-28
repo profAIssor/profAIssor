@@ -5,7 +5,7 @@ import SetupScreen from './components/SetupScreen'
 import SparScreen from './components/SparScreen'
 import { loadSessions, saveSession } from './lib/sessionStore'
 import { WORDS_PER_MINUTE } from './lib/timing'
-import type { AcademicField, Difficulty, PersonaId, Report, Slide, Stage, TranscriptTurn } from './types'
+import type { AcademicField, Difficulty, PersonaId, Report, Slide, SparringLanguage, Stage, TranscriptTurn } from './types'
 
 // recharts pulls in a sizable chart library — only load it when the user
 // actually visits the history screen, not on the initial setup/spar bundle.
@@ -26,6 +26,7 @@ export default function App() {
   const [slides, setSlides] = useState<Slide[]>([])
   const [personaIds, setPersonaIds] = useState<PersonaId[]>([])
   const [difficulty, setDifficulty] = useState<Difficulty>('medium')
+  const [language, setLanguage] = useState<SparringLanguage>('ko')
   const [maxTurns, setMaxTurns] = useState(2)
   const [field, setField] = useState<AcademicField | null>(null)
   const [report, setReport] = useState<Report | null>(null)
@@ -56,7 +57,13 @@ export default function App() {
     setTranscript(finishedTranscript)
     setStage('report')
     try {
-      const r = await fetchReport(script, slides, finishedTranscript, field)
+      const r = await fetchReport(
+        script,
+        slides,
+        finishedTranscript,
+        field,
+        language,
+      )
       setReport(r)
       saveSession({
         field,
@@ -84,13 +91,31 @@ export default function App() {
     setReportError(null)
   }
 
+  const toggleLanguage = () => {
+    const nextLanguage: SparringLanguage = language === 'ko' ? 'en' : 'ko'
+    if (
+      stage !== 'setup' &&
+      stage !== 'history' &&
+      !window.confirm(
+        language === 'ko'
+          ? '영문 모드로 전환하면 현재 스파링을 종료하고 자료 등록 화면으로 돌아갑니다. 계속할까요?'
+          : 'Korean mode will end the current sparring session and return to setup. Continue?',
+      )
+    ) {
+      return
+    }
+
+    setLanguage(nextLanguage)
+    if (stage !== 'setup') handleRestart()
+  }
+
   const currentStepIdx = stage === 'history' ? -1 : STEP_ORDER.indexOf(stage)
   const historySessions = stage === 'history' ? loadSessions() : []
 
   return (
     <div className="flex min-h-screen flex-col bg-[#F9FAFB] font-sans text-slate-900 selection:bg-indigo-100">
       {/* Header */}
-      <header className="z-30 flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-6 shadow-sm sm:px-8">
+      <header className="z-30 flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 shadow-sm sm:px-8">
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -101,14 +126,15 @@ export default function App() {
             <div className="h-4 w-4 rotate-45 border-2 border-white" />
           </button>
           <button type="button" onClick={handleRestart} className="text-lg font-extrabold tracking-tight">
+            {language === 'en' && <span className="text-indigo-600">English </span>}
             prof<span className="text-indigo-600">AI</span>ssor
           </button>
-          <span className="ml-1.5 rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">
+          <span className="ml-1.5 hidden rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500 md:inline">
             발표 스파링 파트너
           </span>
         </div>
 
-        <div className="flex items-center gap-4 sm:gap-6">
+        <div className="flex items-center gap-2 sm:gap-4 lg:gap-6">
           <nav className="hidden items-center gap-4 text-xs font-semibold text-slate-400 sm:flex sm:gap-6">
             {STEP_ORDER.map((s, i) => (
               <span
@@ -134,9 +160,30 @@ export default function App() {
           </nav>
           <button
             type="button"
+            onClick={toggleLanguage}
+            aria-label={language === 'ko' ? '영문 모드로 전환' : 'Switch to Korean mode'}
+            className={
+              'rounded-lg border px-2.5 py-1.5 text-xs font-bold transition-colors sm:px-3 ' +
+              (language === 'en'
+                ? 'border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700'
+                : 'border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-600')
+            }
+          >
+            {language === 'ko' ? (
+              <>
+                English<span className="hidden sm:inline"> 모드</span>
+              </>
+            ) : (
+              <>
+                한국어<span className="hidden sm:inline">로 전환</span>
+              </>
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => setStage('history')}
             className={
-              'rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ' +
+              'rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors sm:px-3 ' +
               (stage === 'history'
                 ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
                 : 'border-slate-200 text-slate-500 hover:border-indigo-300 hover:text-indigo-600')
@@ -150,7 +197,10 @@ export default function App() {
       {/* Main content */}
       <main className="flex-1 px-4 py-8 sm:px-8 sm:py-10">
         {stage === 'setup' && (
-          <SetupScreen onStart={handleStart} />
+          <SetupScreen
+            language={language}
+            onStart={handleStart}
+          />
         )}
 
         {stage === 'spar' && (
@@ -159,6 +209,7 @@ export default function App() {
             slides={slides}
             personaIds={personaIds}
             difficulty={difficulty}
+            language={language}
             maxTurns={maxTurns}
             field={field}
             onFinish={handleFinish}

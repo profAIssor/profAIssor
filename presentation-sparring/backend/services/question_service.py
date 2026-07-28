@@ -11,7 +11,7 @@ from fastapi import HTTPException
 import llm_client
 import material_context
 import prompts
-from core.prompt_rules import SOURCE_TERM_PRESERVATION
+from core.prompt_rules import get_source_term_preservation
 from personas import (
     get_allowed_question_types,
     get_field_hint,
@@ -288,6 +288,18 @@ _QUESTION_STOPWORDS = {
     "대해서",
     "자료",
     "발표",
+    "what",
+    "how",
+    "why",
+    "could",
+    "would",
+    "please",
+    "explain",
+    "describe",
+    "presentation",
+    "the",
+    "and",
+    "from",
 }
 
 # 난이도는 질문의 깊이를 정하는 값이며, 이미 물은 질문을 다시 묻지 않는 기준과는 분리한다.
@@ -359,6 +371,51 @@ def _maximum_question_similarity(
     return max(similarities, default=0.0)
 
 
+_INDIRECT_QUESTION_PREAMBLE_PATTERN = re.compile(
+    r"(?:라고|다고|이라고)\s*"
+    r"(?:하셨는데|말씀하셨는데|설명하셨는데|언급하셨는데)"
+    r"|발표(?:에서|에서는|중에?)?.{0,90}"
+    r"(?:말씀|설명|언급)하셨(?:는데|습니다만)"
+    r"|\b(?:you\s+(?:mentioned|said|stated|explained)).{0,100}"
+    r"\b(?:what\s+do\s+you\s+think|do\s+you\s+think)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_indirect_question_preamble(question: str) -> bool:
+    """자료 인용 서두 뒤에 실제 요구를 붙인 장황한 질문인지 판정."""
+    normalized = re.sub(r"\s+", " ", question).strip()
+    return bool(
+        _INDIRECT_QUESTION_PREAMBLE_PATTERN.search(normalized)
+    )
+
+
+def _question_misses_difficulty_depth(
+    question: str,
+    difficulty: str,
+    language: str,
+) -> bool:
+    """어려움 질문이 정의·명칭 확인 수준으로 낮아졌는지 판정."""
+    if difficulty != "hard":
+        return False
+
+    normalized = re.sub(r"\s+", " ", question).strip().lower()
+    if language == "en":
+        depth_pattern = re.compile(
+            r"\b(?:condition|limitation|failure|exception|assumption|"
+            r"trade-?off|under\s+what|"
+            r"what\s+happens\s+if)\b",
+            re.IGNORECASE,
+        )
+    else:
+        depth_pattern = re.compile(
+            r"(?:조건|한계|실패|예외|전제|가정|통제|환경|상황|"
+            r"성립|깨지|달라지|비용|부하|성능|"
+            r"trade-?off)"
+        )
+    return not bool(depth_pattern.search(normalized))
+
+
 def _generate_question_data(
     req: QuestionRequest,
     *,
@@ -383,6 +440,8 @@ def _generate_question_data(
     # 사용자가 이미 받은 질문과만 비교하여 과도한 연쇄 탈락 방지
     prompt_blocked_questions = list(historical_questions)
     rejected_target_slides: set[int] = set()
+    last_rejection_reason = ""
+    last_rejected_candidate = ""
 
     for attempt in range(4):
         system, user = prompts.build_question_prompt(
@@ -392,9 +451,10 @@ def _generate_question_data(
             difficulty=req.difficulty,
             question_type_priority=question_type_priority,
             excluded_questions=prompt_blocked_questions,
+            language=req.language,
         )
 
-        if attempt > 0:
+        if attempt > 0 and last_rejection_reason == "duplicate":
             rejected_slide_text = (
                 ", ".join(
                     str(index)
@@ -410,6 +470,25 @@ def _generate_question_data(
                 "다른 자료 구간을 선택하세요. "
                 f"직전 탈락 후보가 사용한 슬라이드: {rejected_slide_text}. "
                 "가능하면 해당 슬라이드를 피하고 자료 전체에서 새 질문을 고르세요."
+            )
+        elif attempt > 0 and last_rejection_reason == "style":
+            user += (
+                "\n\n[질문 문장 재작성 지시]\n"
+                "직전 초안은 발표 내용을 되받는 서두 때문에 장황했습니다. "
+                "핵심 대상이나 조건부터 바로 시작하고, 학생이 답해야 할 이유·작동 방식·"
+                "판단 기준·조건을 한 문장으로 직접 물으세요. "
+                "'~라고 하셨는데', '~라고 설명하셨는데', '~라고 언급하셨는데', "
+                "'어떻게 생각하나요?'를 사용하지 마세요. "
+                f"직전 초안: {last_rejected_candidate[:500]}"
+            )
+        elif attempt > 0 and last_rejection_reason == "difficulty":
+            user += (
+                "\n\n[어려움 난이도 재작성 지시]\n"
+                "직전 초안은 명칭·역할·단순 차이 확인에 머물러 어려움 난이도에 "
+                "미치지 못했습니다. 같은 핵심 주제를 유지하되 자료에 근거한 조건, "
+                "한계, 실패 상황, 전제, 원인과 영향 중 하나를 골라 깊게 물으세요. "
+                "여러 요구를 합치지 말고 학생이 이유나 인과관계를 설명하게 하세요. "
+                f"직전 초안: {last_rejected_candidate[:500]}"
             )
 
         try:
@@ -439,6 +518,27 @@ def _generate_question_data(
             candidate,
             historical_questions,
         )
+        misses_difficulty_depth = _question_misses_difficulty_depth(
+            candidate,
+            req.difficulty,
+            req.language,
+        )
+        if (
+            similarity < _QUESTION_DUPLICATE_THRESHOLD
+            and not _has_indirect_question_preamble(candidate)
+            and not misses_difficulty_depth
+        ):
+            return data
+
+        last_rejected_candidate = candidate
+        if _has_indirect_question_preamble(candidate):
+            last_rejection_reason = "style"
+            continue
+        if misses_difficulty_depth:
+            last_rejection_reason = "difficulty"
+            continue
+
+        last_rejection_reason = "duplicate"
         target_slide = data.get("targets_slide")
         if (
             isinstance(target_slide, str)
@@ -448,10 +548,7 @@ def _generate_question_data(
         if isinstance(target_slide, int):
             rejected_target_slides.add(target_slide)
 
-        if similarity < _QUESTION_DUPLICATE_THRESHOLD:
-            return data
-
-        # 다음 재생성 프롬프트에만 탈락 초안 추가
+        # 중복 후보만 다음 프롬프트의 제외 목록에 추가한다.
         prompt_blocked_questions.append(candidate)
 
     raise HTTPException(
@@ -472,7 +569,7 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
             req.persona_id,
             req.difficulty,
         )
-        + SOURCE_TERM_PRESERVATION
+        + get_source_term_preservation(req.language)
     )
     question_type_priority = list(
         get_allowed_question_types(
@@ -537,9 +634,13 @@ def generate_question(req: QuestionRequest) -> QuestionResponse:
             ],
         ]
     )
-    speech_term_aliases = _parse_speech_term_aliases(
-        data.get("speech_term_aliases"),
-        source_text=context_source,
+    speech_term_aliases = (
+        []
+        if req.language == "en"
+        else _parse_speech_term_aliases(
+            data.get("speech_term_aliases"),
+            source_text=context_source,
+        )
     )
 
     return QuestionResponse(

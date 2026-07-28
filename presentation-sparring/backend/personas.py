@@ -201,6 +201,20 @@ def get_allowed_question_types(
         for question_type in allowed_by_difficulty
         if question_type not in ordered
     )
+    if difficulty == "hard":
+        deep_types = {"application", "counterexample"}
+        ordered = [
+            *(
+                question_type
+                for question_type in ordered
+                if question_type in deep_types
+            ),
+            *(
+                question_type
+                for question_type in ordered
+                if question_type not in deep_types
+            ),
+        ]
     return tuple(ordered)
 
 

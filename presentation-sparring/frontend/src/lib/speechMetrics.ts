@@ -357,7 +357,7 @@ export function countSttSyllables(text: string): number {
 /** STT 문자열에서 강한 필러의 인식 하한선 계산. */
 export function countRecognizedFillers(text: string): number {
   const matches = text.match(
-    /(?:^|[\s,.!?…])(?:어+|음+|으+음+)(?=$|[\s,.!?…])/g,
+    /(?:^|[\s,.!?…])(?:어+|음+|으+음+|u+m+|u+h+|e+r+m+|h+m+)(?=$|[\s,.!?…])/gi,
   )
 
   return matches?.length ?? 0
@@ -385,7 +385,7 @@ function tokenizeSpeechText(text: string): SpeechToken[] {
         sourceIndex,
         value,
         normalized,
-        isFiller: /^(?:어+|음+|으+음+)$/.test(normalized),
+        isFiller: /^(?:어+|음+|으+음+|u+m+|u+h+|e+r+m+|h+m+)$/i.test(normalized),
       }
     })
 }

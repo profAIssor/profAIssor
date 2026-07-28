@@ -5,6 +5,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 Difficulty = Literal["easy", "medium", "hard"]
+SparringLanguage = Literal["ko", "en"]
 AcademicField = Literal["engineering", "humanities", "natural"]
 QuestionType = Literal[
     "evidence",
@@ -59,6 +60,7 @@ class QuestionRequest(BaseModel):
     slides: List[Slide] = Field(default_factory=list)
     persona_id: str
     difficulty: Difficulty = "medium"
+    language: SparringLanguage = "ko"
     field: Optional[AcademicField] = None
     excluded_questions: List[str] = Field(default_factory=list)
 
@@ -99,10 +101,14 @@ class EvaluateRequest(BaseModel):
     # 최초 질문 이후 허용되는 추가 질문 수
     max_turns: int = Field(default=2, ge=0, le=3)
     difficulty: Difficulty = "medium"
+    language: SparringLanguage = "ko"
     field: Optional[AcademicField] = None
     term_hints: List[str] = Field(default_factory=list)
     # 이전 프론트엔드 요청 호환용 재질문 표시
     is_unknown_retry: bool = False
+    # 새 프론트는 평가를 먼저 받고 꼬리질문을 별도 요청한다.
+    # 기본값 False로 두어 기존 클라이언트의 묶음 응답을 유지한다.
+    defer_followup: bool = False
 
 
 class EvaluateResponse(BaseModel):
@@ -130,6 +136,25 @@ class EvaluateResponse(BaseModel):
     retry_question_focus: str = ""
     retry_expected_answer_points: List[str] = Field(default_factory=list)
     retry_speech_term_aliases: List[SpeechTermAlias] = Field(
+        default_factory=list
+    )
+
+
+# --- /api/followup ---
+class FollowupRequest(EvaluateRequest):
+    """이미 끝난 평가 결과로 꼬리질문만 생성하는 요청."""
+
+    strengths: str = ""
+    gaps: str = ""
+    rubric: Dict[str, str] = Field(default_factory=dict)
+
+
+class FollowupResponse(BaseModel):
+    followup: Optional[str] = None
+    followup_question_type: Optional[QuestionType] = None
+    followup_focus: str = ""
+    followup_expected_answer_points: List[str] = Field(default_factory=list)
+    followup_speech_term_aliases: List[SpeechTermAlias] = Field(
         default_factory=list
     )
 
@@ -248,6 +273,13 @@ class TranscriptTurn(BaseModel):
     # 재질문에도 답하지 못했을 때 제공한 최종 개념 설명
     final_explanation: Optional[str] = None
 
+    # 참고 답변 생성 시 부족분을 자료 근거로 채우기 위한 질문 계약.
+    # 리포트 LLM이 사용자 답변을 되풀이하지 않고, 질문이 겨눈 핵심과
+    # 자료 기준 기대 요소를 근거로 미충족 부분을 보충하도록 전달한다.
+    # 하위 호환을 위해 선택 필드로 두며, 비어 있으면 종전 동작을 유지한다.
+    question_focus: str = ""
+    expected_answer_points: List[str] = Field(default_factory=list)
+
 
 RevisionActionType = Literal[
     "sentence_split",
@@ -274,6 +306,7 @@ class ReportRequest(BaseModel):
     slides: List[Slide] = Field(default_factory=list)
     transcript: List[TranscriptTurn] = Field(default_factory=list)
     field: Optional[AcademicField] = None
+    language: SparringLanguage = "ko"
 
 
 class SlideCoverage(BaseModel):

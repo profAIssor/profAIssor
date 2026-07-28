@@ -1,5 +1,6 @@
 /** 백엔드 페르소나 목록에서 전달되는 식별자. */
 export type PersonaId = string
+export type SparringLanguage = 'ko' | 'en'
 export type Difficulty = 'easy' | 'medium' | 'hard'
 export type AcademicField = 'engineering' | 'humanities' | 'natural'
 export type QuestionType =
@@ -79,6 +80,14 @@ export interface EvaluateResponse {
   retry_question_focus: string
   retry_expected_answer_points: string[]
   retry_speech_term_aliases?: SpeechTermAlias[]
+}
+
+export interface FollowupResponse {
+  followup: string | null
+  followup_question_type: QuestionType | null
+  followup_focus: string
+  followup_expected_answer_points: string[]
+  followup_speech_term_aliases?: SpeechTermAlias[]
 }
 
 /** 답변 한 건에서 수집한 음성 요약 지표. */
@@ -162,6 +171,12 @@ export interface TranscriptTurn {
 
   /** 재질문에도 답하지 못했을 때 제공한 개념 설명. */
   final_explanation?: string | null
+
+  /** 참고 답변이 부족분을 자료 근거로 채우도록 전달하는 질문 초점. */
+  question_focus?: string
+
+  /** 참고 답변 보충 기준이 되는 자료 기반 기대 요소. */
+  expected_answer_points?: string[]
 }
 
 export interface SpeechSummary {
