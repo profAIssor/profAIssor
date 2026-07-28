@@ -3,6 +3,7 @@
 import logging
 import math
 import re
+from concurrent.futures import Future, ThreadPoolExecutor
 from difflib import SequenceMatcher
 from typing import Dict, List
 
@@ -145,6 +146,97 @@ def _fallback_coverage(slide: Slide, script: str, boilerplate: set) -> SlideCove
             example = ", ".join(dict.fromkeys(missing))[:60]
             missing_point = f"핵심 용어({example})가 대본에서 언급되지 않았습니다."
     return SlideCoverage(index=slide.index, covered=covered, missing_point=missing_point)
+
+
+def _resolve_slide_coverage(
+    slides: List[Slide],
+    script: str,
+    raw_items,
+) -> List[SlideCoverage]:
+    """전용 LLM 판정을 검증하고 누락된 슬라이드는 결정론 결과로 보완."""
+    llm_coverage: Dict[int, dict] = {}
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            llm_coverage[index] = item
+
+    boilerplate = _boilerplate_tokens(slides)
+    coverage: List[SlideCoverage] = []
+    for slide in sorted(slides, key=lambda item: item.index):
+        item = llm_coverage.get(slide.index)
+        if item is None:
+            coverage.append(
+                _fallback_coverage(
+                    slide,
+                    script,
+                    boilerplate,
+                )
+            )
+            continue
+
+        covered = item.get("covered")
+        if not isinstance(covered, bool):
+            coverage.append(
+                _fallback_coverage(
+                    slide,
+                    script,
+                    boilerplate,
+                )
+            )
+            continue
+
+        missing_point = item.get("missing_point")
+        if (
+            not isinstance(missing_point, str)
+            or missing_point.strip().lower() in {"", "null", "none"}
+        ):
+            missing_point = None
+        coverage.append(
+            SlideCoverage(
+                index=slide.index,
+                covered=covered,
+                missing_point=(
+                    None
+                    if covered
+                    else (
+                        missing_point
+                        or "핵심 내용이 대본에서 충분히 언급되지 않았습니다."
+                    )
+                ),
+            )
+        )
+    return coverage
+
+
+def _generate_slide_coverage(
+    slides: List[Slide],
+    script: str,
+) -> List[SlideCoverage]:
+    """슬라이드 커버리지만 별도 생성하고 실패 시 결정론 결과로 복구."""
+    system, user = report_prompt.build_slide_coverage_prompt(
+        script,
+        slides,
+    )
+    try:
+        data = llm_client.chat_json(
+            system,
+            user,
+            kind="slide_coverage",
+        )
+        raw_items = data.get("slide_coverage")
+    except Exception:  # noqa: BLE001
+        logger.exception("Slide coverage generation failed")
+        raw_items = []
+    return _resolve_slide_coverage(
+        slides,
+        script,
+        raw_items,
+    )
 
 
 
@@ -510,18 +602,6 @@ def _parse_answer_coaching(
                 turn.final_explanation,
             ).strip()[:900]
 
-        # 재질문 흐름의 자료 기반 힌트 최후 폴백
-        if (
-            reference_answer is None
-            and turn.retry_question
-            and turn.supplement
-        ):
-            reference_answer = re.sub(
-                r"\s+",
-                " ",
-                turn.supplement,
-            ).strip()[:900]
-
         if reference_answer:
             result.append(
                 AnswerCoaching(
@@ -546,22 +626,103 @@ def _needs_reference_answer(turn) -> bool:
     )
 
 
-def _missing_reference_indices(
+_REFERENCE_GAP_NOISE_PREFIXES = (
+    "구체",
+    "명확",
+    "설명",
+    "언급",
+    "부족",
+    "필요",
+    "부분",
+    "내용",
+    "대한",
+    "관련",
+    "측면",
+    "답변",
+    "없음",
+    "확인",
+    "어떻게",
+    "어떤",
+    "무엇",
+    "충분",
+    "제시",
+    "다루",
+    "포함",
+    "빠졌",
+    "추가",
+)
+
+
+def _shares_reference_term(left: str, right: str) -> bool:
+    """한국어 조사 차이를 허용해 보완점 핵심어가 답에 포함됐는지 확인."""
+    if left == right:
+        return True
+    shorter, longer = (
+        (left, right) if len(left) <= len(right) else (right, left)
+    )
+    common = 0
+    for left_char, right_char in zip(shorter, longer):
+        if left_char != right_char:
+            break
+        common += 1
+    return common >= 2 and common / max(1, len(shorter)) >= 0.6
+
+
+def _gap_requirement_tokens(gaps: str) -> set[str]:
+    """평가 문구에서 참고 답변이 실제로 채워야 할 내용 축만 추출."""
+    return {
+        token.lower()
+        for token in re.findall(r"[0-9A-Za-z가-힣_+.-]{2,}", gaps)
+        if (
+            token.lower() not in _STOPWORDS
+            and not any(
+                token.startswith(prefix)
+                for prefix in _REFERENCE_GAP_NOISE_PREFIXES
+            )
+        )
+    }
+
+
+def _reference_answer_needs_repair(
+    turn,
+    reference_answer: str | None,
+) -> bool:
+    """참고 답변 누락 또는 평가 보완점 미반영 여부 판정."""
+    if not reference_answer:
+        return True
+
+    requirements = _gap_requirement_tokens(turn.gaps)
+    if not requirements:
+        return False
+
+    answer_tokens = _grounding_tokens(reference_answer)
+    return any(
+        not any(
+            _shares_reference_term(requirement, answer)
+            for answer in answer_tokens
+        )
+        for requirement in requirements
+    )
+
+
+def _reference_indices_needing_repair(
     transcript,
     answer_coaching: List[AnswerCoaching],
 ) -> List[int]:
-    """참고 답변이 필요한데 결과에서 누락된 질문 순번 조회."""
-    completed_indices = {
-        item.turn_index
+    """참고 답변이 누락됐거나 최종 보완점을 채우지 못한 질문 순번 조회."""
+    references = {
+        item.turn_index: item.reference_answer
         for item in answer_coaching
-        if item.reference_answer
     }
     return [
         index
         for index, turn in enumerate(transcript)
         if (
             _needs_reference_answer(turn)
-            and index not in completed_indices
+            and _reference_answer_needs_repair(
+                turn,
+                references.get(index),
+            )
         )
     ]
 
@@ -635,6 +796,12 @@ def _format_reference_repair_material(
                     f"[turn_index={index}]",
                     f"질문: {target_question}",
                     f"학생 답변: {target_answer or '(답변 없음)'}",
+                    f"질문 초점: {turn.question_focus or '(없음)'}",
+                    "자료 기준 기대 요소: "
+                    + (
+                        " / ".join(turn.expected_answer_points[:4])
+                        or "(없음)"
+                    ),
                     f"최종 평가: {rubric_context}",
                     f"보완점: {turn.gaps}",
                     "관련 발표 자료:",
@@ -651,7 +818,7 @@ def _repair_missing_reference_answers(
     answer_coaching: List[AnswerCoaching],
 ) -> List[AnswerCoaching]:
     """리포트 LLM이 누락한 참고 답변을 한 번의 보완 호출로 생성."""
-    missing_indices = _missing_reference_indices(
+    missing_indices = _reference_indices_needing_repair(
         req.transcript,
         answer_coaching,
     )
@@ -670,9 +837,15 @@ def _repair_missing_reference_answers(
         else "각 참고 답변은 한국어 1~3문장의 완결된 답변으로 작성하세요. "
     )
     system = (
-        "당신은 발표 질의응답 리포트에서 누락된 참고 답변만 보완합니다. "
+        "당신은 발표 질의응답 리포트에서 누락되었거나 불완전한 참고 답변만 보완합니다. "
         "각 항목의 질문과 발표 자료를 근거로 질문에 직접 답하는 "
         f"{answer_language_rule}"
+        "최종 보완점에 시간·비용·원인·조건처럼 여러 내용 축이 적혀 있으면 "
+        "각 축을 실제 답변 문장 안에서 모두 설명하세요. "
+        "최종 보완점에 적힌 핵심 명사는 reference_answer에도 직접 쓰고, "
+        "각 명사에 대응하는 자료 기준 기대 요소를 빠짐없이 연결하세요. "
+        "단순히 '시간이 걸릴 수 있다'처럼 보완점의 단어만 반복하지 말고, "
+        "자료에 나온 원인·절차·비교 기준과 그 결과를 함께 써서 왜 그런지 채우세요. "
         "학생 답변을 평가하거나 '부족했다'고 언급하지 마세요. "
         "쉬운 재질문이 제시된 항목은 원질문이 아니라 쉬운 재질문에 답하세요. "
         "발표 자료에 없는 사실을 만들지 마세요. "
@@ -747,7 +920,13 @@ def _repair_missing_reference_answers(
     remaining = [
         index
         for index in missing_indices
-        if index not in merged
+        if (
+            index not in merged
+            or _reference_answer_needs_repair(
+                req.transcript[index],
+                merged[index].reference_answer,
+            )
+        )
     ]
     if remaining:
         logger.warning(
@@ -808,9 +987,33 @@ def build_report(req: ReportRequest) -> ReportResponse:
         req.script,
         req.slides,
         req.transcript,
-        speech_context=speech_prompt_context,
         language=req.language,
     )
+    parallel_executor: ThreadPoolExecutor | None = None
+    speech_future: Future[str] | None = None
+    coverage_future: Future[List[SlideCoverage]] | None = None
+    parallel_task_count = int(speech_summary is not None) + int(
+        coverage_available
+    )
+    if parallel_task_count:
+        parallel_executor = ThreadPoolExecutor(
+            max_workers=parallel_task_count,
+            thread_name_prefix="report-parallel",
+        )
+    if speech_summary is not None and parallel_executor is not None:
+        speech_future = parallel_executor.submit(
+            _generate_speech_delivery_feedback,
+            req.transcript,
+            speech_prompt_context,
+            draft="",
+            language=req.language,
+        )
+    if coverage_available and parallel_executor is not None:
+        coverage_future = parallel_executor.submit(
+            _generate_slide_coverage,
+            req.slides,
+            req.script,
+        )
     try:
         data = llm_client.chat_json(
             system,
@@ -818,54 +1021,29 @@ def build_report(req: ReportRequest) -> ReportResponse:
             kind="report",
         )
     except Exception:  # noqa: BLE001
+        if speech_future is not None:
+            speech_future.cancel()
+        if coverage_future is not None:
+            coverage_future.cancel()
+        if parallel_executor is not None:
+            parallel_executor.shutdown(
+                wait=False,
+                cancel_futures=True,
+            )
         logger.exception("LLM call failed in /api/report")
         raise HTTPException(status_code=502, detail="리포트 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
-    # Merge LLM coverage (if any) with a deterministic fallback so EVERY slide
-    # is represented and coverage always shows in the report.
-    llm_cov: Dict[int, dict] = {}
-    for c in data.get("slide_coverage", []) or []:
-        try:
-            llm_cov[int(c.get("index"))] = c
-        except (TypeError, ValueError):
-            continue
-
     coverage: List[SlideCoverage] = []
-    if coverage_available:
-        boilerplate = _boilerplate_tokens(req.slides)
-        for slide in sorted(req.slides, key=lambda s: s.index):
-            if slide.index in llm_cov:
-                c = llm_cov[slide.index]
-                covered = bool(c.get("covered", True))
-                mp = c.get("missing_point")
-                if (
-                    isinstance(mp, str)
-                    and mp.strip().lower()
-                    in ("null", "none", "")
-                ):
-                    mp = None
-                coverage.append(
-                    SlideCoverage(
-                        index=slide.index,
-                        covered=covered,
-                        missing_point=(
-                            None
-                            if covered
-                            else (
-                                mp
-                                or "핵심 내용이 대본에서 충분히 언급되지 않았습니다."
-                            )
-                        ),
-                    )
-                )
-            else:
-                coverage.append(
-                    _fallback_coverage(
-                        slide,
-                        req.script,
-                        boilerplate,
-                    )
-                )
+    if coverage_future is not None:
+        try:
+            coverage = coverage_future.result()
+        except Exception:  # noqa: BLE001
+            logger.exception("Parallel slide coverage failed")
+            coverage = _resolve_slide_coverage(
+                req.slides,
+                req.script,
+                [],
+            )
 
     valid_slide_indices = {slide.index for slide in req.slides}
     revisions = (
@@ -890,22 +1068,14 @@ def build_report(req: ReportRequest) -> ReportResponse:
         answer_coaching,
     )
 
-    raw_speech_feedback = data.get("speech_delivery_feedback")
-    speech_delivery_feedback = _parse_speech_delivery_feedback(
-        raw_speech_feedback,
-        has_speech_summary=speech_summary is not None,
-    )
-    if speech_summary is not None and not speech_delivery_feedback:
-        speech_delivery_feedback = _generate_speech_delivery_feedback(
-            req.transcript,
-            speech_prompt_context,
-            draft=(
-                raw_speech_feedback
-                if isinstance(raw_speech_feedback, str)
-                else ""
-            ),
-            language=req.language,
-        )
+    speech_delivery_feedback = ""
+    if speech_future is not None:
+        try:
+            speech_delivery_feedback = speech_future.result()
+        except Exception:  # noqa: BLE001
+            logger.exception("Parallel speech coaching failed")
+    if parallel_executor is not None:
+        parallel_executor.shutdown(wait=True)
 
     content_feedback = str(
         data.get("content_feedback", "")

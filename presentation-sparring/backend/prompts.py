@@ -73,8 +73,8 @@ _QUESTION_CONTRACT_GUIDE = """
 - “어떻게 수행하나요?”, “절차를 설명해 주세요”는 과정이나 순서를 요구합니다.
 - “예시에 적용해 주세요”는 자료 속 사례에 대한 적용 판단을 요구합니다.
 
-예를 들어 “복구의 두 가지 주요 작업은 무엇인가요?”라는 질문에는 “Undo와 Redo입니다.”라고
-정확히 답하면 충분합니다. 각각의 수행 절차나 로그 종류는 별도 질문에서 명시적으로 요구하지
+예를 들어 명칭 두 가지를 묻는 질문에는 그 두 명칭을 정확히 제시하면 충분합니다.
+각각의 수행 절차나 세부 종류는 별도 질문에서 명시적으로 요구하지
 않는 한 평가 기준에 포함하지 마세요.
 
 expected_answer_points는 질문 문장이 직접 요구한 답만 포함해야 합니다.
@@ -97,15 +97,14 @@ _SEMANTIC_EQUIVALENCE_GUIDE = """
 5. 의미상 충족된 요소는 gaps에 누락으로 적지 마세요.
    근거 구절을 찾을 수 없는 요소만 미충족으로 판단하세요.
 
-예를 들어 기대 요소가 "전체 토큰 쌍 대신 일부 토큰 관계만 계산한다"이고 학생이
-"인접한 토큰끼리만 상호작용해 주변 K개의 토큰만 계산한다"고 답했다면,
-국소적인 계산 방식이 일부 관계만 선택한다는 상위 개념을 필연적으로 함의하므로 충족입니다.
+예를 들어 기대 요소가 상위 개념 하나이고, 학생이 그 개념의 구체적인 작동 방식이나
+사례를 설명해 상위 개념을 논리적으로 함의했다면, 상위 개념의 문구를 그대로 반복하지
+않았더라도 충족입니다. 반대로 같은 단어만 등장하고 실제 명제가 다르면 미충족입니다.
 
 학생 답변은 음성 인식(STT) 전사일 수 있습니다. 평가 전에 질문, 관련 슬라이드, 용어 참고를 이용해
 조사·어미·띄어쓰기와 문맥상 명백한 음성 오인식을 내부적으로 복원하세요.
-예를 들어 문맥이 뒷받침하면 "주변 케익의 토큰"을 "주변 K개의 토큰"으로 해석할 수 있습니다.
-전사 표현이 발표 자료의 용어와 다르더라도 질문·관련 슬라이드·주변 문맥을 함께 보았을 때
-하나의 원문 용어로만 해석된다면 그 용어로 복원해 의미를 평가하세요.
+예를 들어 발음이 비슷해 잘못 전사된 표현이라도, 질문과 관련 슬라이드가 하나의 원문
+용어로만 해석하도록 뒷받침한다면 그 용어로 복원해 의미를 평가하세요.
 strengths와 gaps는 사용자가 바로 이해할 수 있는 자기완결적인 한국어 평가여야 합니다.
 자료·답변의 원문 문장, 조건식, 식별자, 기호를 그대로 붙여 넣어 부족한 점을 대신 설명하지 마세요.
 기술 용어·고유 명칭은 꼭 필요할 때만 원문 표기를 유지하되, 그 용어가 이 질문에서 어떤 개념·관계·조건과
@@ -333,6 +332,10 @@ def build_question_prompt(
         "6. 제외할 이전 질문 목록과 핵심 초점이 겹치지 않는지 확인하세요.\n"
         "7. 선택한 유형과 난이도에 맞는 질문 한 문장, 질문 초점, 기대 답변 요소를 작성하세요.\n\n"
         "질문은 전체 자료를 읽고 만든 것이어야 하지만 한 번에 하나의 핵심 쟁점만 다루세요. "
+        "질문은 핵심 대상이나 조건부터 바로 시작하세요. 발표 내용을 먼저 인용한 뒤 "
+        "'~라고 하셨는데', '~라고 설명하셨는데', '~라고 언급하셨는데'라고 되받는 서두를 "
+        "붙이지 마세요. '어떻게 생각하나요?'처럼 요구가 불분명한 표현 대신 자료에 맞춰 "
+        "이유, 작동 방식, 판단 기준, 조건 중 실제로 답해야 할 내용을 직접 물으세요. "
         "제외할 이전 질문이 있다면 같은 문장을 바꾸어 말하거나 같은 핵심 초점을 다시 묻지 마세요. "
         "자료에 다른 유효한 쟁점이 없을 때만 가장 가까운 주제를 선택하되 이전 질문과 요구 사항을 분명히 달리하세요. "
         "슬라이드 문구나 제목을 그대로 읽고 '설명해 주세요'라고 되묻지 마세요. "
@@ -373,6 +376,154 @@ def build_question_prompt(
     return system, user
 
 
+# 답변 포기 회복 계약.
+#
+# 이전 구현은 평가 → 무응답 재분류 → 재질문 생성을 서로 다른 호출로 나눴고,
+# 힌트를 정답과 다르게 재가공하면서 지나치게 추상적이거나 어색한 문장이
+# 학생에게 표시되는 문제가 있었다. 이제 자료 기반 기준 답변을 그대로 보여 주고,
+# 재질문만 그 답을 근거로 한 단계 낮춰 생성한다.
+_UNKNOWN_RECOVERY_RETRY_RULE = """
+[답변 포기 회복 계약]
+
+answer_status가 unknown일 때만 unknown_recovery를 작성하고, answered이면 null로 두세요.
+아래 1→3 순서를 반드시 지켜 작성하세요. 앞 항목이 뒤 항목의 근거가 됩니다.
+
+1. reference_answer — 발표 대본과 관련 슬라이드에 실제로 등장하는 방법, 조건, 기준,
+   수치, 명칭을 사용해 직전 질문에 직접 답하는 2~3문장입니다.
+   이 값은 학생에게 '생각해 볼 단서'로 그대로 표시되므로 세션에서 선택한
+   질의응답 언어로 작성된 자연스럽고 자기완결적인 설명이어야 합니다.
+   수단이나 결론을 지목하지 않고 "추가적인 조치가 필요하다", "적절히 대응해야 한다"처럼
+   끝나는 문장, 질문의 전제를 다시 서술하기만 한 문장은 실패로 간주합니다.
+   자료에서 답의 근거를 찾을 수 없으면 unknown_recovery 전체를 null로 두세요.
+
+2. retry_question — reference_answer가 답하는 대상과 같은 것을 묻되 사고 단계를
+   한 단계 낮춘 질문입니다.
+   직전 질문이 묻는 국면을 다른 국면으로 바꾸지 마세요. 원인을 물었다면 원인을,
+   대응 방안을 물었다면 대응 방안을 그대로 유지한 채 범위만 좁히세요.
+   저장·분산·작동 방식을 물었다면 그 방식의 일부를 더 쉽게 물어야 하며,
+   역할·효과·성능을 묻는 질문으로 바꾸지 마세요.
+   요구는 하나만 담고, 발표 자료 안에서 답을 추론할 수 있어야 합니다.
+   직전 질문이 여러 항목이나 여러 가지를 요구했다면 관계 하나만 선택하세요.
+   reference_answer에 나온 구체적인 기술 용어·대상·조건·결과를 질문 문장에 직접
+   언급하세요. 정답 명칭은 이미 '생각해 볼 단서'에 공개되므로 숨기지 마세요.
+   "질문에서 다룬 요소", "한 요소", "다른 요소", "핵심 결과", "이 방법",
+   "해당 개념"처럼 무엇을 가리키는지 불분명한 표현을 사용하지 마세요.
+   reference_answer가 설명한 전체 목적·상황·흐름을 바탕으로 요소 사이의 연결이나
+   구체적으로 이름을 밝힌 대상이 결과에 미치는 영향과 이유를 설명하게 하세요.
+   직전 질문을 짧게 줄여 반복하지 말고, 비정의형 질문을 단순 용어 정의 질문으로 바꾸지 마세요.
+
+3. retry_question_type, retry_focus, retry_expected_answer_points는 재질문만 보고
+   평가할 수 있도록 새로 작성하세요. retry_question_type은 재질문 문장의 실제
+   요구에 맞춰 evidence, counterexample, application, definition 중 하나를 고르세요.
+   직전 질문의 유형이나 기대 요소를 그대로 옮기지 마세요.
+
+학생이 입력한 답변 포기 문장은 인용하거나 언급하지 마세요.
+관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요.
+"""
+
+
+# 재질문에도 답하지 못한 경우의 마무리 설명.
+#
+# 이전 구현은 "핵심 개념의 정의, 역할, 관계를 설명하라"고 요구해 정의가 맨 앞에
+# 놓였고, 그 결과 약어 풀이와 일반 배경으로 채워져 정작 질문의 답이 빠졌다.
+# 첫 문장을 직접적인 답으로 고정해 같은 실패를 막는다.
+_UNKNOWN_RECOVERY_CLOSURE_RULE = """
+[재질문 실패 시 마무리 설명 계약]
+
+answer_status가 unknown일 때만 unknown_recovery를 작성하고, answered이면 null로 두세요.
+학생은 원질문과 쉬운 재질문에 모두 답하지 못했습니다. 새 질문을 만들지 마세요.
+
+explanation은 다음 순서로 작성한 3~5문장입니다.
+
+1. 첫 문장은 발표 자료를 근거로 직전 쉬운 재질문에 직접 답하는 완결된 문장이어야 합니다.
+   구체적인 방법, 조건, 기준, 명칭을 반드시 포함하세요.
+2. 그다음 문장부터 그 답을 이해하는 데 필요한 개념과 관계만 덧붙이세요.
+
+용어의 사전적 정의나 약어 풀이로 시작하지 마세요.
+질문이 요구하지 않은 배경 설명, 일반론, 다른 주제의 지표는 넣지 마세요.
+자료에 없는 사실은 만들지 마세요.
+영문 기술 용어와 고유 명칭은 슬라이드 원문 그대로 유지하고 번역하지 마세요.
+"""
+
+
+_UNKNOWN_RECOVERY_RETRY_SCHEMA = (
+    '"unknown_recovery": {'
+    '"reference_answer": "<학생에게 그대로 표시할 자료 기반 직접 답변 2~3문장>", '
+    '"retry_question": "<reference_answer의 실제 용어를 직접 명시해 관계 하나를 묻는 재질문>", '
+    '"retry_question_type": "<evidence|counterexample|application|definition>", '
+    '"retry_focus": "<재질문의 평가 초점>", '
+    '"retry_expected_answer_points": ["<요소1>", "<요소2>"], '
+    '"retry_speech_term_aliases": ['
+    '{"canonical": "<자료 원문의 영문 용어>", "aliases": ["<한글 발음 표기>"]}'
+    "], "
+    '"related_slides": [<번호 1~2개>]'
+    "} 또는 null"
+)
+
+_UNKNOWN_RECOVERY_CLOSURE_SCHEMA = (
+    '"unknown_recovery": {'
+    '"explanation": "<원질문에 직접 답하는 문장으로 시작하는 3~5문장>", '
+    '"related_slides": [<번호 1~3개>]'
+    "} 또는 null"
+)
+
+
+def _unknown_recovery_contract(
+    mode: str,
+    language: str,
+    difficulty: str = "medium",
+) -> tuple[str, str]:
+    """답변 포기 시 같은 호출에서 생성할 회복 계약의 규칙과 스키마를 반환.
+
+    mode는 서버가 질문 역할을 보고 미리 확정한다. 쓰이지 않을 분기를
+    프롬프트에 넣지 않으므로, 사용되지 않는 출력 토큰이 발생하지 않는다.
+    """
+    if mode == "closure":
+        rule = _UNKNOWN_RECOVERY_CLOSURE_RULE
+        schema = _UNKNOWN_RECOVERY_CLOSURE_SCHEMA
+        language_rule = (
+            "[Recovery output language override]\n"
+            "The general Korean evaluation-feedback rule does not apply to "
+            "unknown_recovery.explanation. Write explanation in clear, natural "
+            "English only and do not write Korean sentences in this field."
+            if language == "en"
+            else "explanation은 자연스러운 한국어로 작성하세요."
+        )
+    elif mode == "retry":
+        rule = _UNKNOWN_RECOVERY_RETRY_RULE
+        schema = _UNKNOWN_RECOVERY_RETRY_SCHEMA
+        language_rule = (
+            "[Recovery output language override]\n"
+            "The general Korean evaluation-feedback rule does not apply to "
+            "unknown_recovery. Write reference_answer, retry_question, "
+            "retry_focus, and every retry_expected_answer_points item in "
+            "natural English only. Do not write Korean sentences in these fields. "
+            "Set retry_speech_term_aliases to an empty array."
+            if language == "en"
+            else (
+                "reference_answer와 retry_question은 자연스러운 한국어로 작성하세요. "
+                "retry_speech_term_aliases에는 영문 기술 용어의 ko-KR 발음 후보만 넣으세요."
+            )
+        )
+    else:
+        # 회복 계약이 필요 없는 호출에서는 필드 자체를 만들지 않는다
+        return "", '"unknown_recovery": null'
+
+    difficulty_rule = ""
+    if mode == "retry" and difficulty == "hard":
+        difficulty_rule = (
+            "\n[어려움 난이도의 답변 포기 처리]\n"
+            "reference_answer는 다른 난이도와 마찬가지로 자료 기반 직접 답변을 빠짐없이 작성하세요. "
+            "retry_question은 명칭, 용어, 목록 중 하나를 맞히는 문제가 아니라, "
+            "reference_answer의 구체적인 용어를 직접 명시한 뒤 그 대상과 조건이 "
+            "자료에 나온 결과로 어떻게 이어지는지 설명하게 해야 합니다. "
+            "학생이 정답 명칭 한 단어만 말해서는 충족할 수 없도록 "
+            "원인·영향·조건 중 하나를 요구하세요.\n"
+        )
+
+    return f"{rule}\n{difficulty_rule}{language_rule}\n", schema
+
+
 def build_evaluate_prompt(
     persona_system: str,
     script: str,
@@ -387,9 +538,16 @@ def build_evaluate_prompt(
     question_focus: str = "",
     context_slides: List[int] | None = None,
     expected_answer_points: List[str] | None = None,
+    question_role: str = "root",
     language: str = "ko",
+    unknown_recovery_mode: str = "retry",
 ):
-    """자료 맥락을 참고해 답변 내용만 평가합니다."""
+    """자료 맥락을 참고해 답변 내용만 평가합니다.
+
+    unknown_recovery_mode는 답변 포기 시 같은 호출에서 무엇을 함께 생성할지
+    지정합니다. "retry"는 힌트와 재질문, "closure"는 마무리 개념 설명,
+    "none"은 회복 계약을 생성하지 않습니다.
+    """
     difficulty_hint = _EVALUATION_DIFFICULTY_HINTS.get(
         difficulty,
         _EVALUATION_DIFFICULTY_HINTS["medium"],
@@ -397,8 +555,11 @@ def build_evaluate_prompt(
     if language == "en":
         output_language_rule = (
             "[Output language]\n"
-            "Interpret the student's answer as an English presentation answer, but write strengths, gaps, and every "
-            "user-visible evaluation or coaching explanation in natural Korean. Preserve English source technical "
+            "Interpret the student's answer as an English presentation answer. Write only strengths, gaps, verdict-related "
+            "evaluation feedback, and rubric labels in natural Korean. Questions and unknown-recovery learning content "
+            "(reference_answer, retry_question, retry_focus, retry_expected_answer_points, and explanation) "
+            "must remain in English. "
+            "Preserve English source technical "
             "terms exactly only when they are needed in the explanation. Do not use raw source sentences, formulas, "
             "or unexplained notation as visible feedback. Only answer_evidence is an internal exact source excerpt. "
             "For server "
@@ -416,6 +577,7 @@ def build_evaluate_prompt(
         if root_question_type in QUESTION_TYPE_IDS
         else "unknown"
     )
+    is_retry_question = question_role == "retry"
 
     if question_type in _QUESTION_TYPE_EVALUATION_RULES:
         question_type_text = question_type
@@ -428,7 +590,10 @@ def build_evaluate_prompt(
         )
 
     answer_mode_rule = (
-        "서버의 명시적 무응답 판정은 이미 별도 처리됐지만, 최종 분류는 답변 내용을 보고 결정하세요. "
+        "answer_status는 정답 여부가 아니라 답변을 시도했는지로만 결정하세요. "
+        "내용이 있는 답변은 정답과 다르거나 질문의 주제를 벗어났더라도, 근거가 없거나 "
+        "음성 인식으로 문장이 깨졌더라도 answered입니다. 그런 경우 verdict를 '부족'으로 두고 "
+        "gaps에서 무엇이 어긋났는지 구체적으로 설명하세요. "
         "학생 답변이 실질적인 내용 없이 모르겠다, 기억나지 않는다, 준비하지 못했다, "
         "배운 적 없다, 넘어가 달라는 뜻을 표현하거나 질문과 무관한 말로 회피한다면 "
         "answer_status를 unknown으로 설정하세요. 이때 verdict는 '확인 필요', "
@@ -453,6 +618,25 @@ def build_evaluate_prompt(
         "빠진 한 요소만 gaps에서 다루세요. 핵심이 틀렸거나 질문의 요구에 실질적으로 "
         "답하지 못했다면 verdict는 부족으로 작성하세요."
     )
+    evaluation_scope_rule = (
+        "[쉬운 재질문 평가 범위]\n"
+        "이번 학생 답변은 최초 질문이 아니라 [평가 대상 쉬운 재질문]에 대한 답입니다. "
+        "verdict, strengths, gaps, rubric은 쉬운 재질문이 직접 요구한 범위만 기준으로 "
+        "결정하세요. 최초 질문에서 요구했지만 쉬운 재질문이 묻지 않은 내용은 학생이 "
+        "말하지 않았더라도 감점하거나 gaps에 적지 마세요. "
+        "expected_answer_points도 쉬운 재질문이 직접 요구한 요소만 required_by_question=true로 "
+        "표시하고, 원질문에서 남은 요구나 재질문이 묻지 않은 요소는 "
+        "required_by_question=false로 표시하세요. "
+        "쉬운 재질문의 요구를 올바르게 충족했다면 최초 질문 전체를 완성하지 않았더라도 "
+        "verdict는 충분, gaps는 없음으로 작성하세요."
+        if is_retry_question
+        else (
+            "[평가 범위]\n"
+            "verdict, strengths, gaps, rubric은 [평가 대상 질문]이 직접 요구한 "
+            "범위만 기준으로 결정하세요. expected_answer_points 중 질문이 직접 "
+            "요구하지 않은 요소는 required_by_question=false로 표시하세요."
+        )
+    )
 
     term_hint_text = (
         ", ".join(term_hints[:12])
@@ -460,12 +644,20 @@ def build_evaluate_prompt(
         else "(별도 용어 힌트 없음)"
     )
 
+    recovery_rule, recovery_schema = _unknown_recovery_contract(
+        unknown_recovery_mode,
+        language,
+        difficulty,
+    )
+
     system = (
-        f"[페르소나]\n{persona_system}\n\n"
         f"{_QUESTION_CONTRACT_GUIDE}\n"
         f"{_SEMANTIC_EQUIVALENCE_GUIDE}\n"
+        f"[페르소나]\n{persona_system}\n\n"
         f"{difficulty_hint}\n\n"
         f"{output_language_rule}\n\n"
+        f"{recovery_rule}\n"
+        f"{evaluation_scope_rule}\n\n"
         f"[현재 질문 유형 평가 규칙]\n{question_type_rule}\n\n"
         "먼저 직전 질문의 명시적 요구를 추출한 뒤 그 범위만 평가하세요. "
         "질문이 두 명칭을 묻고 학생이 두 명칭을 정확히 답했다면 그 답변은 충분합니다. "
@@ -476,15 +668,19 @@ def build_evaluate_prompt(
         "맞는 것으로 보지 마세요. 같은 의미를 자신의 말로 설명하면 인정하세요. "
         "반대로 핵심 개념을 다른 기준으로 오해했다면 짧게 답했더라도 구체적으로 지적하세요. "
         "학생이 말하지 않은 장점이나 자료에 없는 사실을 만들지 마세요. "
+        "strengths는 학생 답변에서 실제로 확인된 강점을 자연스러운 문장으로 쓰고, "
+        "확인된 강점이 없을 때만 빈 문자열로 두세요. JSON 스키마의 설명 문구나 "
+        "꺾쇠괄호(< >)로 둘러싸인 자리표시자를 결과에 복사하지 마세요. "
         f"{answer_mode_rule} "
         f"{result_rule} "
         'JSON만 반환: {'
         '"answer_status": "answered|unknown", '
         '"verdict": "충분|부분 충족|부족|확인 필요", '
-        '"strengths": "<질문 범위 안에서 확인된 강점 또는 빈 문자열>", '
+        '"strengths": "", '
         '"gaps": "<없음 또는 보완 안내>", '
         '"expected_point_assessments": ['
         '{"point_index": <0부터 시작하는 기대 요소 번호>, '
+        '"required_by_question": <현재 평가 대상 질문이 직접 요구하면 true, 아니면 false>, '
         '"covered": <true|false>, '
         '"answer_evidence": "<covered=true이면 학생 답변의 짧은 원문 구절, 아니면 빈 문자열>"}'
         "], "
@@ -492,7 +688,23 @@ def build_evaluate_prompt(
         '"직접성": "부족|보통|우수", '
         '"근거": "부족|보통|우수", '
         '"논리": "부족|보통|우수"'
-        "}}"
+        "}, "
+        f"{recovery_schema}"
+        "}"
+    )
+
+    root_question_context = (
+        ""
+        if is_retry_question
+        else (
+            f"[최초 질문 유형]\n{root_type_text}\n\n"
+            f"[최초 질문]\n{root_question_text[:700]}\n\n"
+        )
+    )
+    target_question_header = (
+        "평가 대상 쉬운 재질문"
+        if is_retry_question
+        else "평가 대상 질문"
     )
 
     user = (
@@ -500,14 +712,15 @@ def build_evaluate_prompt(
         f"[질문 관련 슬라이드]\n{_format_context_slides(slides, context_slides)}\n\n"
         f"[질문 초점]\n{question_focus.strip() or '(명시되지 않음)'}\n\n"
         f"[기대 답변 요소]\n{_format_expected_points(expected_answer_points)}\n\n"
-        f"[최초 질문 유형]\n{root_type_text}\n\n"
         f"[현재 질문 유형]\n{question_type_text}\n\n"
-        f"[최초 질문]\n{root_question_text[:700]}\n\n"
-        f"[직전 질문]\n{question[:700]}\n\n"
+        f"[{target_question_header}]\n{question[:700]}\n\n"
+        f"{root_question_context}"
         f"[학생 답변]\n{answer[:1800]}\n\n"
         f"[용어 참고]\n{term_hint_text}\n\n"
         "기대 답변 요소마다 목록에 표시된 번호를 point_index로 사용해 "
         "expected_point_assessments를 빠짐없이 작성하세요. "
+        "각 요소가 현재 평가 대상 질문에서 직접 요구되는지도 "
+        "required_by_question으로 판정하세요. "
         "covered=true의 answer_evidence는 해석하거나 고쳐 쓴 문장이 아니라 학생 답변에서 "
         "그대로 옮긴 짧은 구절이어야 합니다. 기대 답변 요소가 없거나 answer_status가 unknown이면 "
         "expected_point_assessments는 빈 배열로 두세요. "

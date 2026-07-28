@@ -46,6 +46,7 @@ RequestKind = Literal[
     "followup",
     "unknown_closure",
     "report",
+    "slide_coverage",
     "speech_coaching",
     "reference_repair",
     "chat",
@@ -75,15 +76,18 @@ _SESSION.mount(
 
 # 호출 목적별 출력 토큰 상한.
 # question/evaluate는 응답 JSON 스키마가 고정이라 짧게 제한하고,
-# report는 슬라이드 커버리지 배열이 슬라이드 수에 비례해 길어지므로 여유를 둔다.
+# 긴 리포트 본문과 슬라이드별 커버리지는 병렬 호출로 분리한다.
 # 출력 상한은 비용 통제와 '잘린 JSON → 파싱 실패' 방지를 겸한다.
 _MAX_OUTPUT_TOKENS = {
     "question": 700,
-    "evaluate": 900,
+    # 답변 포기 시 힌트·재질문 계약이 같은 응답에 포함되므로 상한을 넓힌다.
+    # 상한은 과금 대상이 아니라 잘린 JSON을 막는 안전장치이므로 여유를 둔다.
+    "evaluate": 1400,
     "retry": 700,
     "followup": 700,
     "unknown_closure": 900,
-    "report": 4096,
+    "report": 3200,
+    "slide_coverage": 1800,
     "speech_coaching": 500,
     "reference_repair": 1800,
     "chat": 1200,
@@ -647,21 +651,55 @@ def _call_mock(
                 int(index)
                 for index in re.findall(r"\[슬라이드\s+(\d+)\]", slide_section)[:2]
             ]
-            retry_question, retry_question_type = _mock_unknown_retry(user)
+            focus = _shorten(
+                _extract_section(user, "질문 초점"),
+                limit=55,
+            )
+
+            # 회복 계약은 평가 응답에 함께 실린다. 서버가 지정한 모드를
+            # 시스템 프롬프트의 스키마로 구분해 실제 계약 형태를 재현한다.
+            if '"explanation"' in system:
+                recovery = {
+                    "explanation": (
+                        f"{focus}에 대한 답은 자료에 제시된 기준을 그대로 적용하는 것입니다. "
+                        "그 기준이 어떤 조건에서 성립하는지와, 조건이 달라질 때 결과가 "
+                        "어떻게 바뀌는지를 함께 정리해 두면 같은 질문에 답할 수 있습니다."
+                    ),
+                    "related_slides": related_slides,
+                }
+            elif '"reference_answer"' in system:
+                retry_question, retry_question_type = _mock_unknown_retry(user)
+                recovery = {
+                    "reference_answer": (
+                        f"{focus}에서는 자료에 제시된 기준을 적용해 판단한다."
+                    ),
+                    "hint": (
+                        f"{focus}을 판단할 때 자료가 어떤 조건을 먼저 확인하라고 했는지, "
+                        "그 조건이 충족되지 않을 때 무엇이 달라지는지 떠올려 보세요."
+                    ),
+                    "retry_question": retry_question,
+                    "retry_focus": f"{focus}의 기본 기준 확인",
+                    "retry_expected_answer_points": [
+                        f"{focus}에 적용되는 기준 한 가지",
+                        "그 기준이 성립하는 조건",
+                    ],
+                    "retry_speech_term_aliases": [],
+                    "related_slides": related_slides,
+                }
+                _ = retry_question_type
+            else:
+                recovery = None
+
             return json.dumps(
                 {
                     "answer_status": "unknown",
                     "verdict": "확인 필요",
                     "strengths": "",
                     "gaps": "질문의 핵심 내용을 발표 전에 다시 확인해 보세요.",
-                    "supplement": (
-                        "질문과 관련된 핵심 개념과 비교 기준을 자료에서 다시 확인해 보세요. "
-                        "정의만 외우기보다 두 개념의 목적과 적용 대상을 구분해 정리하는 것이 좋습니다."
-                    ),
+                    "expected_point_assessments": [],
                     "related_slides": related_slides,
-                    "followup": retry_question,
-                    "followup_question_type": retry_question_type,
                     "rubric": {},
+                    "unknown_recovery": recovery,
                 },
                 ensure_ascii=False,
             )

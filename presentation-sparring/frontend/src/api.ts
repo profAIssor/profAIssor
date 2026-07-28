@@ -2,6 +2,7 @@ import type {
   AcademicField,
   Difficulty,
   EvaluateResponse,
+  FollowupResponse,
   Persona,
   PersonaId,
   QuestionResponse,
@@ -24,17 +25,20 @@ const PERSONA_REQUEST_TIMEOUT_MS = 15_000
 const SLIDE_EXTRACTION_TIMEOUT_MS = 60_000
 
 // 백엔드의 LLM 호출 제한(60초)에 후처리 여유를 더한 단일 호출 예산.
-// 질문은 중복 회피로 최대 4회, 평가는 최대 2회, 리포트는
+// 질문은 중복 회피로 최대 4회, 평가는 최대 2회, 꼬리질문은 1회, 리포트는
 // 참고 답변·음성 코칭 보완을 포함해 최대 3회의 순차 호출이 가능하다.
 // 아래 호출 횟수는 백엔드 재생성 정책을 바꿀 때 함께 조정해야 합니다.
 const LLM_CALL_BUDGET_MS = 75_000
 const MAX_QUESTION_LLM_CALLS = 4
 const MAX_EVALUATE_LLM_CALLS = 2
+const MAX_FOLLOWUP_LLM_CALLS = 1
 const MAX_REPORT_LLM_CALLS = 3
 const QUESTION_REQUEST_TIMEOUT_MS =
   LLM_CALL_BUDGET_MS * MAX_QUESTION_LLM_CALLS
 const EVALUATE_REQUEST_TIMEOUT_MS =
   LLM_CALL_BUDGET_MS * MAX_EVALUATE_LLM_CALLS
+const FOLLOWUP_REQUEST_TIMEOUT_MS =
+  LLM_CALL_BUDGET_MS * MAX_FOLLOWUP_LLM_CALLS
 const REPORT_REQUEST_TIMEOUT_MS =
   LLM_CALL_BUDGET_MS * MAX_REPORT_LLM_CALLS
 const RETRY_DELAY_MS = 600
@@ -365,8 +369,49 @@ export function evaluateAnswer(args: {
       term_hints: args.termHints ?? [],
       is_unknown_retry:
         args.questionRole === 'retry',
+      defer_followup: true,
     },
     EVALUATE_REQUEST_TIMEOUT_MS,
+  )
+}
+
+/** 완료된 평가 결과를 바탕으로 꼬리질문만 별도 생성. */
+export function fetchFollowup(
+  args: Parameters<typeof evaluateAnswer>[0] & {
+    strengths: string
+    gaps: string
+    rubric: Record<string, string>
+  },
+): Promise<FollowupResponse> {
+  return post(
+    '/api/followup',
+    {
+      script: args.script,
+      slides: args.slides,
+      persona_id: args.personaId,
+      root_question: args.rootQuestion,
+      root_question_type: args.rootQuestionType,
+      question: args.question,
+      question_type: args.questionType,
+      question_role: args.questionRole,
+      question_focus: args.questionFocus,
+      context_slides: args.contextSlides,
+      expected_answer_points:
+        args.expectedAnswerPoints,
+      answer: args.answer,
+      turn: args.turn,
+      max_turns: args.maxTurns,
+      difficulty: args.difficulty,
+      field: args.field,
+      language: args.language,
+      term_hints: args.termHints ?? [],
+      is_unknown_retry:
+        args.questionRole === 'retry',
+      strengths: args.strengths,
+      gaps: args.gaps,
+      rubric: args.rubric,
+    },
+    FOLLOWUP_REQUEST_TIMEOUT_MS,
   )
 }
 

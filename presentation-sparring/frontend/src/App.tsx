@@ -126,6 +126,7 @@ export default function App() {
             <div className="h-4 w-4 rotate-45 border-2 border-white" />
           </button>
           <button type="button" onClick={handleRestart} className="text-lg font-extrabold tracking-tight">
+            {language === 'en' && <span className="text-indigo-600">English </span>}
             prof<span className="text-indigo-600">AI</span>ssor
           </button>
           <span className="ml-1.5 hidden rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500 md:inline">

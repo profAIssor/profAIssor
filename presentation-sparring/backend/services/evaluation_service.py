@@ -20,6 +20,8 @@ from personas import (
 from schemas import (
     EvaluateRequest,
     EvaluateResponse,
+    FollowupRequest,
+    FollowupResponse,
     QuestionType,
     SpeechTermAlias,
 )
@@ -109,6 +111,34 @@ def _parse_expected_point_assessments(
     return parsed
 
 
+_VISIBLE_PLACEHOLDER_PATTERN = re.compile(r"<[^<>]{2,}>")
+
+
+def _sanitize_visible_evaluation_fields(
+    evaluation_data: dict,
+) -> dict:
+    """JSON 스키마 자리표시자가 사용자 평가 문구로 노출되는 것을 차단."""
+    normalized = dict(evaluation_data)
+    for field in ("strengths", "gaps"):
+        value = str(normalized.get(field, "")).strip()
+        if not _VISIBLE_PLACEHOLDER_PATTERN.search(value):
+            continue
+
+        cleaned = _VISIBLE_PLACEHOLDER_PATTERN.sub("", value)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
+        if cleaned:
+            normalized[field] = cleaned
+        elif field == "strengths":
+            normalized[field] = ""
+        elif str(normalized.get("verdict", "")).strip() == "충분":
+            normalized[field] = "없음"
+        else:
+            normalized[field] = (
+                "질문에서 요구한 핵심 내용을 더 구체적으로 설명해 주세요."
+            )
+    return normalized
+
+
 def _rubric_counts(rubric: Dict[str, str]) -> Dict[str, int]:
     """평가 등급별 축 개수 집계."""
     return {
@@ -149,39 +179,195 @@ def _fallback_supplement(
     language: str = "ko",
 ) -> str:
     """모델 보충 설명 누락 시 사용할 사고 방향 안내."""
-    focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
-    subject = focus or "현재 질문의 핵심 개념"
     if language == "en":
-        english_subject = focus or "the key concept in this question"
         english_guides: Dict[QuestionType, str] = {
-            "definition": "Start by identifying what role it plays and how it differs from a similar concept.",
-            "evidence": "Find one fact, result, or relationship in the presentation that connects the cause to the conclusion.",
-            "counterexample": "Consider which changed condition would make the result different.",
-            "application": "First identify one decision criterion from the original explanation that can be applied here.",
+            "definition": "In the relevant slides, separate what each item takes as input, what it measures or does, and which result it changes.",
+            "evidence": "Trace the measured subject, the comparison or condition, and the result that changes; then connect them in that order.",
+            "counterexample": "Separate the original condition, the condition that changes, and the resulting difference.",
+            "application": "Identify the condition to check, the decision criterion, and the result that criterion predicts.",
         }
-        return (
-            f"This question asks you to explain {english_subject}. "
-            f"{english_guides[current_type]}"
-        )
+        return english_guides[current_type]
     type_guides: Dict[QuestionType, str] = {
         "definition": (
-            "익숙한 용어를 그대로 반복하기보다, 그 개념이 어떤 역할을 하고 "
-            "비슷한 개념과 무엇이 다른지부터 떠올려 보세요."
+            "관련 슬라이드에서 각 항목이 무엇을 입력으로 보고, 무엇을 측정하거나 "
+            "처리하며, 어떤 결과를 바꾸는지 서로 나눠 보세요."
         ),
         "evidence": (
-            "결론을 먼저 외우기보다, 발표 자료에서 원인과 결과를 연결해 주는 "
-            "사실이나 수치를 한 가지 찾아보세요."
+            "자료에서 측정 대상, 비교하거나 적용하는 조건, 그에 따라 달라지는 "
+            "결과를 찾아 이 순서로 연결해 보세요."
         ),
         "counterexample": (
-            "설명이 항상 성립한다고 가정하지 말고, 조건이 달라졌을 때 "
-            "결과가 바뀌는 지점을 먼저 생각해 보세요."
+            "자료의 원래 조건과 달라지는 조건을 분리한 뒤, 그 변화 때문에 "
+            "결과의 어느 부분이 달라지는지 살펴보세요."
         ),
         "application": (
-            "새로운 상황의 정답을 바로 고르기보다, 원래 설명에서 사용할 수 있는 "
-            "판단 기준 한 가지를 먼저 꺼내 보세요."
+            "먼저 확인할 조건, 선택에 쓰는 판단 기준, 그 기준으로 예상하는 "
+            "결과를 각각 나눠 보세요."
         ),
     }
-    return f"이 질문은 {subject}을 한 번에 설명하도록 요구합니다. {type_guides[current_type]}"
+    return type_guides[current_type]
+
+
+_HINT_META_PREFIXES = (
+    "생각",
+    "떠올",
+    "확인",
+    "찾아",
+    "살펴",
+    "종류",
+    "관련",
+    "정보",
+    "통계",
+    "질문",
+    "답변",
+    "핵심",
+    "개념",
+    "역할",
+    "여러",
+    "가지",
+    "각각",
+    "하나",
+    "있",
+    "자료",
+    "슬라이드",
+    "먼저",
+    "무엇",
+    "어떤",
+    "필요",
+    "consider",
+    "think",
+    "recall",
+    "check",
+    "find",
+    "question",
+    "answer",
+    "concept",
+    "role",
+    "type",
+    "types",
+    "several",
+    "each",
+    "one",
+    "slide",
+)
+
+def _hint_is_too_generic(
+    hint: str,
+    source_question: str,
+    question_focus: str,
+) -> bool:
+    """질문 재서술 외에 실제 회상 단서가 두 개 미만인지 판정."""
+    hint_tokens = _focus_tokens(hint)
+    anchor_tokens = (
+        _focus_tokens(source_question)
+        | _focus_tokens(question_focus)
+    )
+    informative_tokens = {
+        token
+        for token in hint_tokens
+        if (
+            not any(
+                token.startswith(prefix)
+                for prefix in _HINT_META_PREFIXES
+            )
+            and not any(
+                _shares_topic_stem(token, anchor)
+                for anchor in anchor_tokens
+            )
+        )
+    }
+    return len(informative_tokens) < 2
+
+
+def _retry_keeps_multi_item_load(
+    retry_question: str,
+) -> bool:
+    """쉬운 재질문이 둘 이상의 항목을 한꺼번에 요구하는지 확인."""
+    multi_item_pattern = re.compile(
+        r"(?:두|세|네|여러|모든|각각|몇\s*가지|"
+        r"\b(?:two|three|four|several|all)\b)",
+        re.IGNORECASE,
+    )
+    return bool(multi_item_pattern.search(retry_question))
+
+
+def _retry_is_too_generic(
+    retry_question: str,
+    source_question: str,
+    question_focus: str,
+) -> bool:
+    """재질문이 항목 수만 줄이고 식별 단서를 추가하지 않았는지 확인."""
+    generic_pattern = re.compile(
+        r"(?:중\s*(?:하나|한\s*가지)|필요한\s*(?:것|정보)|"
+        r"one\s+of|one\s+(?:thing|item|type))",
+        re.IGNORECASE,
+    )
+    return (
+        bool(generic_pattern.search(retry_question))
+        and _hint_is_too_generic(
+            retry_question,
+            source_question,
+            question_focus,
+        )
+    )
+
+
+def _retry_uses_vague_references(
+    retry_question: str,
+    language: str,
+) -> bool:
+    """재질문이 실제 용어 대신 지시어·포괄어로 대상을 숨기는지 판정."""
+    if language == "en":
+        pattern = re.compile(
+            r"\b(?:an?|one|another|other|relevant)\s+(?:element|item|method|concept)\b"
+            r"|\b(?:the|this)\s+(?:key|requested)\s+(?:result|outcome)\b",
+            re.IGNORECASE,
+        )
+    else:
+        pattern = re.compile(
+            r"(?:질문에서\s*다룬|앞서\s*다룬|관련된?)\s*(?:요소|항목|방법|개념)"
+            r"|(?:한|다른|해당)\s*(?:요소|항목|방법|개념)"
+            r"|(?:핵심|해당)\s*(?:결과|성과)"
+            r"|(?:이|그)\s*(?:방법|개념|요소)"
+        )
+    return bool(pattern.search(retry_question))
+
+
+def _has_english_session_language_mismatch(text: str) -> bool:
+    """영어 세션의 학생 노출 회복 문장에 한국어가 섞였는지 판정."""
+    return bool(re.search(r"[가-힣]", text or ""))
+
+
+def _hard_retry_is_too_easy(
+    retry_question: str,
+    language: str,
+) -> bool:
+    """어려움 재질문이 명칭 맞히기나 단답형으로 무너졌는지 판정."""
+    normalized = re.sub(r"\s+", " ", retry_question).strip().lower()
+    if language == "en":
+        if re.search(
+            r"(?:what\s+is\s+the\s+(?:term|name)|identify|name\s+one)",
+            normalized,
+        ):
+            return True
+        return not bool(
+            re.search(
+                r"(?:why|how|under\s+what\s+condition|impact|effect|reason)",
+                normalized,
+            )
+        )
+
+    if re.search(
+        r"(?:명칭|용어|이름|무엇인가요|무엇입니까|한\s*가지는\s*무엇)",
+        normalized,
+    ):
+        return True
+    return not bool(
+        re.search(
+            r"(?:왜|어떻게|영향|이유|조건|한계|근거)",
+            normalized,
+        )
+    )
 
 
 def _fallback_unknown_retry(
@@ -198,7 +384,7 @@ def _fallback_unknown_retry(
             "definition": (
                 f"Could you first explain one role that {english_subject} plays?",
                 f"Core role of {english_subject}",
-                ["One role of the concept", "One feature that distinguishes it from a similar concept"],
+                ["One role of the concept"],
             ),
             "evidence": (
                 f"What is one clue in the presentation that connects the cause and result for {english_subject}?",
@@ -221,7 +407,7 @@ def _fallback_unknown_retry(
         "definition": (
             f"{subject}이 실제로 하는 역할 한 가지를 먼저 설명해 주실 수 있나요?",
             f"{subject}의 핵심 역할 확인",
-            ["개념이 수행하는 역할 한 가지", "비슷한 개념과 구분되는 특징 한 가지"],
+            ["개념이 수행하는 역할 한 가지"],
         ),
         "evidence": (
             f"{subject}에 대해 원인과 결과를 이어 주는 자료 속 단서 한 가지는 무엇인가요?",
@@ -264,8 +450,184 @@ def _is_trivial_definition_retry(question: str, current_type: QuestionType) -> b
     )
 
 
-def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
-    """무응답 문장을 제외한 사고 지원 설명과 무료 재질문 생성."""
+# 조사·어미 차이를 흡수하기 위한 어간 비교 기준.
+# 한국어는 "복구를"과 "복구가"처럼 같은 어간이 다른 토큰으로 잡히므로
+# 정확 일치만으로는 주제 비교가 사실상 동작하지 않는다.
+_TOPIC_STEM_MIN_CHARS = 2
+_TOPIC_STEM_MIN_RATIO = 0.6
+
+# 재질문 계약이 기준 주제와 겹쳐야 하는 최소 비율.
+# _is_duplicate_question의 상한(0.84)과 함께 양방향 밴드를 이룬다.
+# 너무 비슷해도 안 되고, 너무 멀어져도 안 된다.
+_RETRY_TOPIC_ANCHOR_MIN_RATIO = 0.25
+
+
+def _shares_topic_stem(left: str, right: str) -> bool:
+    """조사·어미 차이를 흡수한 어간 수준의 토큰 일치 판정."""
+    if left == right:
+        return True
+    shorter, longer = (
+        (left, right) if len(left) <= len(right) else (right, left)
+    )
+    if len(shorter) < _TOPIC_STEM_MIN_CHARS:
+        return False
+
+    common = 0
+    for left_char, right_char in zip(shorter, longer):
+        if left_char != right_char:
+            break
+        common += 1
+
+    return (
+        common >= _TOPIC_STEM_MIN_CHARS
+        and common / len(shorter) >= _TOPIC_STEM_MIN_RATIO
+    )
+
+
+def _retry_drifts_from_anchor(
+    retry_question: str,
+    retry_points: List[str],
+    reference_answer: str,
+    source_question: str,
+    question_focus: str,
+) -> bool:
+    """재질문 계약이 기준 답변의 주제에서 이탈했는지 판정.
+
+    내부 기준 답변이 있으면 그것을, 없으면 직전 질문을 기준으로 삼습니다.
+    기준이 원인을 다루는데 재질문이 예방을 묻는 식의 국면 이탈을
+    추가 LLM 호출 없이 걸러내기 위한 결정론적 안전망입니다.
+    """
+    anchor_tokens = _focus_tokens(reference_answer) or (
+        _focus_tokens(source_question) | _focus_tokens(question_focus)
+    )
+    if not anchor_tokens:
+        return False
+
+    contract_tokens = set(_focus_tokens(retry_question))
+    for point in retry_points:
+        contract_tokens |= _focus_tokens(point)
+    if not contract_tokens:
+        return False
+
+    matched = sum(
+        1
+        for token in contract_tokens
+        if any(
+            _shares_topic_stem(token, anchor)
+            for anchor in anchor_tokens
+        )
+    )
+    return matched / len(contract_tokens) < _RETRY_TOPIC_ANCHOR_MIN_RATIO
+
+
+def _unknown_contradicted_by_evidence(
+    req: EvaluateRequest,
+    evaluation_data: dict,
+) -> bool:
+    """unknown 판정과 요소별 충족 판정이 서로 모순인지 확인.
+
+    _parse_expected_point_assessments는 covered=true를 학생 답변의 실제
+    부분 문자열 근거가 있을 때만 인정합니다. 따라서 충족 요소가 하나라도
+    남아 있으면 답변에 실질 내용이 있었다는 뜻이며, 이를 별도 분류 호출
+    없이 확인할 수 있습니다.
+    """
+    assessments = _parse_expected_point_assessments(
+        evaluation_data.get("expected_point_assessments"),
+        req.expected_answer_points,
+        req.answer,
+    )
+    return any(assessments.values())
+
+
+_RETRY_POINT_CONTENT_PATTERN = re.compile(r"[A-Za-z가-힣]{2,}")
+
+
+def _parse_retry_expected_points(raw) -> List[str]:
+    """번호·자리표시자처럼 평가 기준으로 쓸 수 없는 재질문 요소를 제거."""
+    return [
+        point
+        for point in _parse_string_list(raw, limit=3)
+        if _RETRY_POINT_CONTENT_PATTERN.search(point)
+    ]
+
+
+def _infer_retry_question_type(
+    question: str,
+    fallback: QuestionType,
+) -> QuestionType:
+    """재질문 유형 필드가 비었을 때 질문 문장의 실제 요구로 최소 보정."""
+    normalized = re.sub(r"\s+", " ", question).strip().lower()
+    if re.search(
+        r"(?:역할|의미|뜻|정의|무엇인가|what\s+is|what\s+does|define)",
+        normalized,
+    ):
+        return "definition"
+    if re.search(
+        r"(?:근거|이유|왜|증거|evidence|reason|why)",
+        normalized,
+    ):
+        return "evidence"
+    if re.search(
+        r"(?:예외|반례|달라질|성립하지|counterexample|exception|fail)",
+        normalized,
+    ):
+        return "counterexample"
+    if re.search(
+        r"(?:적용|사용할|활용|상황|apply|application|use)",
+        normalized,
+    ):
+        return "application"
+    return fallback
+
+
+def _mark_retry_out_of_scope_points(
+    req: EvaluateRequest,
+    evaluation_data: dict,
+) -> dict:
+    """재질문이 직접 요구하지 않은 기대 요소를 추가 호출 없이 제외."""
+    if req.question_role != "retry" and not req.is_unknown_retry:
+        return evaluation_data
+
+    raw_items = evaluation_data.get("expected_point_assessments")
+    if not isinstance(raw_items, list):
+        return evaluation_data
+
+    out_of_scope_indices: set[int] = set()
+    for item in raw_items:
+        if (
+            not isinstance(item, dict)
+            or item.get("required_by_question") is not False
+        ):
+            continue
+        index = item.get("point_index")
+        if isinstance(index, str) and index.strip().isdigit():
+            index = int(index.strip())
+        if (
+            isinstance(index, int)
+            and not isinstance(index, bool)
+            and 0 <= index < len(req.expected_answer_points)
+        ):
+            out_of_scope_indices.add(index)
+
+    if not out_of_scope_indices:
+        return evaluation_data
+
+    normalized = dict(evaluation_data)
+    normalized["_out_of_scope_expected_point_indices"] = sorted(
+        out_of_scope_indices
+    )
+    return normalized
+
+
+def _build_unknown_retry(
+    req: EvaluateRequest,
+    recovery: Optional[dict] = None,
+) -> EvaluateResponse:
+    """평가 호출이 함께 생성한 회복 계약으로 재질문 응답을 구성합니다.
+
+    추가 LLM 호출을 하지 않습니다. 계약이 비었거나 검증에 실패하면
+    결정론적 기본값으로 대체합니다.
+    """
     current_type = req.question_type or req.root_question_type or "definition"
     prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
     selected_slides = material_context.select_context_slides(
@@ -273,63 +635,11 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         req.context_slides,
         query=req.question_focus or req.question,
     )
-    slide_context = "\n\n".join(
-        f"[슬라이드 {slide.index}]\n{slide.text[:1800]}"
-        for slide in selected_slides[:3]
-    ) or "(관련 슬라이드 없음)"
-    expected_points = "\n".join(
-        f"- {point}"
-        for point in req.expected_answer_points[:3]
-        if point.strip()
-    ) or "- 현재 질문에서 확인하려던 핵심 요소 한 가지"
     source_question = req.question.strip()
     focus = req.question_focus.strip() or source_question[:160]
-    output_language_rule = (
-        "Write supplement, retry_question, retry_focus, and retry_expected_answer_points in natural English. "
-        "Set retry_speech_term_aliases to an empty array."
-        if req.language == "en"
-        else (
-            "학생에게 보이는 내용은 자연스러운 한국어로 작성하세요. "
-            "retry_speech_term_aliases에는 영문 기술 용어의 ko-KR 발음 후보만 넣으세요."
-        )
-    )
 
-    system = (
-        "당신은 발표 질의응답 연습을 돕는 평가자입니다. "
-        "학생이 현재 질문에 답하지 못했으므로 질문 횟수를 차감하지 않는 재도전 기회를 한 번 제공합니다. "
-        "학생이 입력한 무응답 문장은 제공되지 않으며 이전 답변을 추론하거나 언급해서는 안 됩니다. "
-        "supplement에는 정답 전체를 말하지 말고, 답을 유추하는 데 필요한 전제·비교·인과관계를 2~3문장으로 설명하세요. "
-        "retry_question은 현재 질문을 짧게 바꿔 반복하지 말고, 답변에 필요한 사고 과정의 바로 앞 단계 하나만 물으세요. "
-        "하나의 요구만 포함하고, 발표 자료 안에서 답을 추론할 수 있어야 합니다. "
-        "비정의형 질문을 단순한 용어 정의 질문으로 바꾸지 마세요. "
-        "관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요. "
-        "retry_focus와 retry_expected_answer_points는 재질문 자체만 평가할 수 있도록 새로 작성하세요. "
-        f"{output_language_rule} "
-        'JSON만 반환: {"supplement":"<사고 지원 설명>","retry_question":"<재질문>",'
-        '"retry_focus":"<재질문의 평가 초점>","retry_expected_answer_points":["<요소1>","<요소2>"],'
-        '"retry_speech_term_aliases":[{"canonical":"<원문 영문 용어>",'
-        '"aliases":["<한글 발음 표기>"]}],'
-        '"related_slides":[<번호 1~2개>]}. '
-    )
-    user = (
-        f"[현재 질문]\n{source_question}\n\n"
-        f"[현재 질문 유형]\n{current_type}\n\n"
-        f"[현재 질문 초점]\n{focus}\n\n"
-        f"[현재 질문의 기대 요소]\n{expected_points}\n\n"
-        f"[관련 발표 자료]\n{slide_context}\n\n"
-        "학생이 스스로 답을 떠올릴 수 있도록 사고 단계를 한 단계 낮춘 재질문 계약을 생성하세요."
-    )
-
-    data: dict = {}
-    try:
-        data = llm_client.chat_json(
-            system,
-            user,
-            get_model_hint(req.persona_id),
-            kind="retry",
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("LLM retry generation failed; deterministic fallback used")
+    # 평가 호출에서 함께 받은 회복 계약. 없으면 전부 결정론적 기본값으로 대체한다.
+    data: dict = recovery if isinstance(recovery, dict) else {}
 
     valid_slide_indices = {slide.index for slide in req.slides}
     preferred_indices = {
@@ -348,20 +658,30 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         current_type,
         req.language,
     )
-    supplement_raw = data.get("supplement")
-    supplement = (
-        supplement_raw.strip()
-        if isinstance(supplement_raw, str) and supplement_raw.strip()
-        else _fallback_supplement(focus, current_type, req.language)
+    reference_answer_raw = data.get("reference_answer")
+    reference_answer = (
+        reference_answer_raw.strip()
+        if isinstance(reference_answer_raw, str)
+        else ""
     )
-    retry_raw = data.get("retry_question")
-    retry_question = retry_raw.strip() if isinstance(retry_raw, str) else ""
     if (
-        not retry_question
-        or _is_duplicate_question(retry_question, [source_question], threshold=0.84)
-        or _is_trivial_definition_retry(retry_question, current_type)
+        req.language == "en"
+        and _has_english_session_language_mismatch(reference_answer)
     ):
-        retry_question = fallback_question
+        logger.info(
+            "Korean reference answer rejected in English recovery "
+            "(persona=%s type=%s)",
+            req.persona_id,
+            current_type,
+        )
+        reference_answer = ""
+    # 별도의 힌트를 재가공하지 않는다. 모델이 자료를 근거로 작성한 직접 답변을
+    # 학생 화면의 '생각해 볼 단서'에 그대로 전달한다.
+    supplement = reference_answer or _fallback_supplement(
+        focus,
+        current_type,
+        req.language,
+    )
 
     retry_focus_raw = data.get("retry_focus")
     retry_focus = (
@@ -369,10 +689,115 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         if isinstance(retry_focus_raw, str) and retry_focus_raw.strip()
         else fallback_focus
     )
-    retry_points = _parse_string_list(
+    retry_points = _parse_retry_expected_points(
         data.get("retry_expected_answer_points"),
-        limit=3,
-    ) or fallback_points
+    )
+    if req.language == "en":
+        if _has_english_session_language_mismatch(retry_focus):
+            retry_focus = fallback_focus
+        if any(
+            _has_english_session_language_mismatch(point)
+            for point in retry_points
+        ):
+            retry_points = fallback_points
+
+    retry_raw = data.get("retry_question")
+    retry_question = retry_raw.strip() if isinstance(retry_raw, str) else ""
+    # 양방향 검증: 직전 질문의 반복(상한)도, 다른 국면으로의 이탈(하한)도 거른다.
+    retry_rejected = (
+        not retry_question
+        or (
+            req.language == "en"
+            and _has_english_session_language_mismatch(
+                retry_question,
+            )
+        )
+        or _is_duplicate_question(retry_question, [source_question], threshold=0.84)
+        or _retry_keeps_multi_item_load(
+            retry_question,
+        )
+        or _retry_uses_vague_references(
+            retry_question,
+            req.language,
+        )
+        or _retry_is_too_generic(
+            retry_question,
+            source_question,
+            focus,
+        )
+        or (
+            req.difficulty == "hard"
+            and _hard_retry_is_too_easy(
+                retry_question,
+                req.language,
+            )
+        )
+        or _is_trivial_definition_retry(retry_question, current_type)
+        or _retry_drifts_from_anchor(
+            retry_question,
+            retry_points,
+            reference_answer,
+            source_question,
+            focus,
+        )
+    )
+    if retry_rejected:
+        logger.info(
+            "Unknown retry contract rejected; deterministic fallback used "
+            "(persona=%s type=%s)",
+            req.persona_id,
+            current_type,
+        )
+        if req.difficulty == "hard":
+            explicit_subject = (
+                focus
+                or source_question.rstrip("?.! ")
+                or retry_focus.strip()
+            )
+            if req.language == "en":
+                retry_question = (
+                    f"For {explicit_subject}, how does the specific mechanism "
+                    "described in the reference answer lead to its stated result?"
+                )
+                retry_focus = (
+                    f"Mechanism and result for {explicit_subject}"
+                )
+            else:
+                retry_question = (
+                    f"{explicit_subject}에서 사용되는 기술의 작동 원리와 "
+                    "인과 관계를 구체적으로 설명해 주세요."
+                )
+                retry_focus = f"{explicit_subject}의 작동 방식과 결과의 연결"
+            if req.language == "en":
+                retry_points = [
+                    f"Specific mechanism used for {explicit_subject}",
+                    "How that mechanism leads to the stated result",
+                ]
+            else:
+                retry_points = [
+                    f"{explicit_subject}에 사용되는 구체적인 작동 방식",
+                    "그 작동 방식이 자료의 결과로 이어지는 이유",
+                ]
+            retry_type = "evidence"
+        else:
+            retry_question = fallback_question
+            retry_type = current_type
+            retry_focus = fallback_focus
+            retry_points = fallback_points
+    else:
+        retry_type = _parse_question_type(
+            data.get("retry_question_type"),
+            _infer_retry_question_type(
+                retry_question,
+                current_type,
+            ),
+        )
+        if not retry_points:
+            _, _, retry_points = _fallback_unknown_retry(
+                retry_focus,
+                retry_type,
+                req.language,
+            )
     retry_alias_source = "\n".join(
         [
             retry_question,
@@ -396,7 +821,7 @@ def _build_unknown_retry(req: EvaluateRequest) -> EvaluateResponse:
         supplement=supplement,
         related_slides=related_slides,
         retry_question=retry_question,
-        retry_question_type=current_type,
+        retry_question_type=retry_type,
         retry_question_focus=retry_focus,
         retry_expected_answer_points=retry_points,
         retry_speech_term_aliases=retry_speech_term_aliases,
@@ -451,75 +876,27 @@ def _fallback_unknown_closure(
 
 def _build_unknown_closure(
     req: EvaluateRequest,
+    recovery: Optional[dict] = None,
 ) -> EvaluateResponse:
-    """쉬운 재질문에도 답하지 못한 경우 개념 설명과 학습 안내 생성."""
-    prompt_slides = material_context.build_prompt_slides(
-        req.script,
-        req.slides,
-    )
-    selected_slides = material_context.select_context_slides(
-        prompt_slides,
-        req.context_slides,
-        query=req.question_focus or req.root_question or req.question,
-    )
-    slide_context = "\n\n".join(
-        f"[슬라이드 {slide.index}]\n{slide.text[:1800]}"
-        for slide in selected_slides[:3]
-    ) or "(관련 슬라이드 없음)"
-    expected_points = "\n".join(
-        f"- {point}"
-        for point in req.expected_answer_points[:3]
-        if point.strip()
-    ) or "- 질문에서 확인하려던 핵심 개념과 역할"
-    output_language_rule = (
-        "Write supplement in clear, natural English."
-        if req.language == "en"
-        else "supplement는 자연스러운 한국어로 작성하세요."
-    )
+    """평가 호출이 함께 생성한 마무리 설명으로 응답을 구성합니다.
 
-    system = (
-        "당신은 발표 질의응답 학습을 마무리하는 설명자입니다. "
-        "학생이 원질문에 답하지 못해 힌트와 쉬운 재질문을 받았지만 "
-        "재질문에도 답하지 못했습니다. 새 질문을 만들지 마세요. "
-        "supplement에는 관련 발표 자료만 근거로 핵심 개념의 정의, 역할, "
-        "질문에서 요구한 관계를 2~4문장으로 명확히 설명하세요. "
-        "정답을 숨기는 힌트가 아니라 학습을 위한 개념 설명이어야 합니다. "
-        "자료에 없는 사실은 만들지 마세요. "
-        "영문 기술 용어, 프로토콜명, 모드명, 알고리즘명, 약어는 "
-        "슬라이드 원문 그대로 유지하고 한국어로 번역하지 마세요. "
-        f"{output_language_rule} "
-        'JSON만 반환: {"supplement":"<개념 설명>",'
-        '"related_slides":[<번호 1~3개>]}.'
-    )
-    user = (
-        f"[원질문]\n{req.root_question or req.question}\n\n"
-        f"[쉬운 재질문]\n{req.question}\n\n"
-        f"[질문 초점]\n{req.question_focus}\n\n"
-        f"[기대 답변 요소]\n{expected_points}\n\n"
-        f"[관련 발표 자료]\n{slide_context}\n\n"
-        "학생이 이후에 다시 공부할 수 있도록 개념 설명을 작성하세요."
-    )
+    추가 LLM 호출을 하지 않습니다. 설명이 비어 있으면 발표 자료 기반의
+    결정론적 학습 안내로 대체합니다.
+    """
+    data: dict = recovery if isinstance(recovery, dict) else {}
 
-    data: dict = {}
-    try:
-        data = llm_client.chat_json(
-            system,
-            user,
-            get_model_hint(req.persona_id),
-            kind="unknown_closure",
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "LLM unknown closure generation failed; fallback used"
-        )
-
-    supplement_raw = data.get("supplement")
+    # 회복 계약은 explanation을 사용하지만, 이전 스키마의 supplement도 함께 받아들인다.
+    explanation_raw = data.get("explanation") or data.get("supplement")
     supplement = (
-        supplement_raw.strip()
-        if isinstance(supplement_raw, str)
-        and supplement_raw.strip()
+        explanation_raw.strip()
+        if isinstance(explanation_raw, str) and explanation_raw.strip()
         else _fallback_unknown_closure(req)
     )
+    if (
+        req.language == "en"
+        and _has_english_session_language_mismatch(supplement)
+    ):
+        supplement = _fallback_unknown_closure(req)
 
     valid_slide_indices = {slide.index for slide in req.slides}
     preferred_indices = {
@@ -583,7 +960,11 @@ def _extract_gap_focus(raw_gap: str) -> str:
             first_part = first_part[: -len(suffix)].strip(" .,:;-")
             break
 
-    first_part = re.sub(r"(라는|이라는|한다는|된다는|있다는)$", "", first_part)
+    first_part = re.sub(
+        r"(?:에\s*)?대한$|(라는|이라는|한다는|된다는|있다는)$",
+        "",
+        first_part,
+    )
     return first_part[:180].strip(" .,:;-")
 
 
@@ -879,6 +1260,7 @@ def _normalize_semantic_consistency(
     ]
     if (
         out_of_scope_indices
+        and required_indices
         and all(
             effective_assessments.get(index) is True
             for index in required_indices
@@ -963,6 +1345,16 @@ def _audit_uncovered_expected_points(
     evaluation_data: dict,
 ) -> dict:
     """최초 평가가 놓친 바꿔 말하기·작동 설명의 의미 충족 여부를 재검증합니다."""
+    existing_out_of_scope = {
+        index
+        for index in evaluation_data.get(
+            "_out_of_scope_expected_point_indices",
+            [],
+        )
+        if isinstance(index, int)
+        and not isinstance(index, bool)
+        and 0 <= index < len(req.expected_answer_points)
+    }
     initial_assessments = _parse_expected_point_assessments(
         evaluation_data.get("expected_point_assessments"),
         req.expected_answer_points,
@@ -971,7 +1363,15 @@ def _audit_uncovered_expected_points(
     uncovered_indices = [
         index
         for index, point in enumerate(req.expected_answer_points)
-        if point.strip() and initial_assessments.get(index) is False
+        if (
+            point.strip()
+            and index not in existing_out_of_scope
+            and initial_assessments.get(index) is False
+            and _has_partial_expected_point_signal(
+                req.answer,
+                point,
+            )
+        )
     ][:3]
     if not uncovered_indices:
         return evaluation_data
@@ -1091,6 +1491,51 @@ def _audit_uncovered_expected_points(
         *out_of_scope_indices,
     })
     return normalized
+
+
+_AUDIT_GENERIC_TOKENS = {
+    "내용",
+    "방법",
+    "결과",
+    "사용",
+    "통해",
+    "경우",
+    "자료",
+    "질문",
+    "데이터",
+    "설명",
+    "기능",
+    "역할",
+}
+
+
+def _has_partial_expected_point_signal(
+    answer: str,
+    expected_point: str,
+) -> bool:
+    """답변에 기대 요소의 일부를 실제로 언급한 경우에만 의미 audit 허용."""
+    answer_tokens = _focus_tokens(answer)
+    point_tokens = _focus_tokens(expected_point)
+    if not answer_tokens or not point_tokens:
+        return False
+
+    matched_tokens = {
+        point_token
+        for point_token in point_tokens
+        if any(
+            _shares_topic_stem(point_token, answer_token)
+            for answer_token in answer_tokens
+        )
+    }
+    informative_matches = {
+        token
+        for token in matched_tokens
+        if token not in _AUDIT_GENERIC_TOKENS
+    }
+    return (
+        len(informative_matches) >= 2
+        or any(len(token) >= 5 for token in informative_matches)
+    )
 
 
 _LOGIC_GAP_MARKERS = (
@@ -1274,6 +1719,19 @@ def _question_addresses_gap(
 def _contains_hangul(text: str) -> bool:
     """영문 질문 계약을 깨는 한글 포함 여부."""
     return bool(re.search(r"[가-힣]", text or ""))
+
+
+def _has_malformed_korean_question(text: str) -> bool:
+    """관형격 뒤 조사가 충돌하거나 자리표시자가 남은 한국어 질문 거부."""
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    return bool(
+        _VISIBLE_PLACEHOLDER_PATTERN.search(normalized)
+        or re.search(
+            r"(?:에\s*대한|에\s*관한)(?:가|이|을|를|은|는)\b",
+            normalized,
+        )
+        or re.search(r"(?:대한가|관한가)\s", normalized)
+    )
 
 
 def _natural_followup_subject(
@@ -1481,7 +1939,7 @@ def _build_followup(
     )
     if not has_meaningful_gap:
         gap_focus = ""
-    elif req.difficulty == "medium":
+    elif req.difficulty in {"medium", "hard"}:
         gap_focus = _select_single_followup_focus(
             req,
             raw_gap,
@@ -1646,6 +2104,10 @@ def _build_followup(
             req.language == "en"
             and _contains_hangul(followup)
         )
+        or (
+            req.language == "ko"
+            and _has_malformed_korean_question(followup)
+        )
         or _is_duplicate_question(
             followup,
             [req.question, req.root_question or ""],
@@ -1659,7 +2121,7 @@ def _build_followup(
             )
         )
         or (
-            req.difficulty == "medium"
+            req.difficulty in {"medium", "hard"}
             and _is_compound_medium_followup(followup)
         )
     ):
@@ -1762,49 +2224,13 @@ def _fallback_substantive_evaluation(
     }
 
 
-def _classify_no_answer_with_llm(
-    req: EvaluateRequest,
-) -> Optional[bool]:
-    """정오와 무관하게 실제 답변 시도 여부를 의미 단위로 판별합니다."""
-    system = (
-        "You classify the communicative intent of a presentation Q&A response. "
-        "Judge meaning, not exact wording, spelling, grammar, language, or answer correctness. "
-        "Use no_answer only when the speaker solely communicates inability, lack of knowledge, "
-        "or refusal and provides no factual claim, reasoning, mechanism, example, or attempted "
-        "answer. Use substantive_attempt whenever any answer content is attempted, even if it is "
-        "incorrect, incomplete, off-topic, hedged, or distorted by speech recognition. "
-        'Return JSON only: {"classification":"no_answer|substantive_attempt"}.'
-    )
-    user = (
-        f"[Question]\n{req.question[:700]}\n\n"
-        f"[Response]\n{req.answer[:1800]}"
-    )
-    try:
-        data = llm_client.chat_json(
-            system,
-            user,
-            get_model_hint(req.persona_id),
-            kind="evaluate",
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("No-answer intent classification failed")
-        return None
-
-    classification = str(data.get("classification", "")).strip().lower()
-    if classification == "no_answer":
-        return True
-    if classification == "substantive_attempt":
-        return False
-
-    logger.warning(
-        "Unexpected no-answer classification: %r",
-        classification,
-    )
-    return None
-
-
 def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
     current_role = "retry" if req.is_unknown_retry else req.question_role
+
+    # 답변 포기 시 무엇을 함께 생성할지 서버가 미리 확정한다.
+    # 재질문 슬롯에서 또 포기하면 마무리 설명, 그 외에는 힌트와 재질문이다.
+    # 쓰이지 않을 분기는 프롬프트에 넣지 않으므로 출력 토큰도 발생하지 않는다.
+    recovery_mode = "closure" if current_role == "retry" else "retry"
 
     persona = get_persona(req.persona_id)
     persona_system = (
@@ -1831,7 +2257,9 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
         question_focus=req.question_focus,
         context_slides=req.context_slides,
         expected_answer_points=req.expected_answer_points,
+        question_role=current_role,
         language=req.language,
+        unknown_recovery_mode=recovery_mode,
     )
     try:
         data = llm_client.chat_json(
@@ -1847,67 +2275,41 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
             detail="AI 평가 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
         )
 
-    # 모델이 unknown으로 본 답변만 별도의 의미 판정으로 확인합니다.
-    # 표현 목록 없이 실제 답변 시도와 명시적 답변 포기를 구분합니다.
+    # unknown 판정과 회복 계약을 같은 호출에서 받았으므로 추가 호출이 없습니다.
+    recovery = data.get("unknown_recovery")
+    recovery = recovery if isinstance(recovery, dict) else None
+
     model_status = str(data.get("answer_status", "")).strip().lower()
     recovered_substantive_unknown = False
     if model_status == "unknown":
-        no_answer = _classify_no_answer_with_llm(req)
-        if no_answer is not False:
-            if current_role == "retry":
-                return _build_unknown_closure(req)
-            return _build_unknown_retry(req)
-
-        recovered_substantive_unknown = True
-        reinforced_system = (
-            system
-            + "\n\n[답변 상태 강제 규칙]\n"
-            "학생은 내용이 있는 답변을 제출했습니다. 정답과 다르거나 질문의 주제에서 "
-            "벗어났더라도 answer_status는 반드시 answered입니다. 그런 경우 verdict를 "
-            "'부족'으로 두고, strengths에는 실제로 시도한 부분만, gaps에는 질문과 "
-            "어긋난 핵심을 구체적으로 한국어로 설명하세요. unknown을 반환하지 마세요."
-        )
-        try:
-            data = llm_client.chat_json(
-                reinforced_system,
-                user,
-                get_model_hint(req.persona_id),
-                kind="evaluate",
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "Substantive answer re-evaluation failed; fallback used"
+        if _unknown_contradicted_by_evidence(req, data):
+            # 모델이 unknown이라 하면서 동시에 답변 원문 근거로 충족 요소를
+            # 표시한 자기모순 상태입니다. 실제로는 내용이 있는 답변이므로
+            # 별도 재분류 호출 없이 결정론적 최소 평가로 되돌립니다.
+            logger.info(
+                "Unknown status contradicted by verbatim evidence; "
+                "recovered as answered (persona=%s)",
+                req.persona_id,
             )
             data = _fallback_substantive_evaluation(req)
+            recovered_substantive_unknown = True
+        elif recovery_mode == "closure":
+            return _build_unknown_closure(req, recovery)
+        else:
+            return _build_unknown_retry(req, recovery)
 
-        if str(data.get("answer_status", "")).strip().lower() == "unknown":
-            data = _fallback_substantive_evaluation(req)
-
+    data = _sanitize_visible_evaluation_fields(data)
+    data = _mark_retry_out_of_scope_points(req, data)
     data = _audit_uncovered_expected_points(req, data)
     data = _normalize_semantic_consistency(req, data)
     data = _normalize_rubric_consistency(req, data)
-    concept_explanation: Optional[EvaluateResponse] = None
-    if (
-        recovered_substantive_unknown
-        and current_role == "retry"
-        and str(data.get("verdict", "")).strip() != "충분"
-    ):
-        concept_explanation = _build_unknown_closure(req)
     response_kwargs = dict(
         answer_status="answered",
         verdict=str(data.get("verdict", "")).strip(),
         strengths=str(data.get("strengths", "")).strip(),
         gaps=str(data.get("gaps", "")).strip(),
-        supplement=(
-            concept_explanation.supplement
-            if concept_explanation
-            else None
-        ),
-        related_slides=(
-            concept_explanation.related_slides
-            if concept_explanation
-            else []
-        ),
+        supplement=None,
+        related_slides=[],
         rubric=_parse_rubric(data.get("rubric")),
     )
 
@@ -1925,11 +2327,17 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
         )
 
     # 난이도와 평가 축에 따른 정상 꼬리질문 사용 결정
-    if current_role in {"root", "retry"} and _should_ask_followup(
+    if current_role == "root" and _should_ask_followup(
         req,
         response_kwargs["rubric"],
         response_kwargs["gaps"],
     ):
+        if req.defer_followup:
+            return EvaluateResponse(
+                **response_kwargs,
+                next_action="ask_followup",
+            )
+
         followup_contract = _build_followup(req, data)
         if followup_contract is not None:
             (
@@ -1958,4 +2366,33 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
     return EvaluateResponse(
         **response_kwargs,
         next_action="finish",
+    )
+
+
+def generate_followup(req: FollowupRequest) -> FollowupResponse:
+    """완료된 평가를 다시 수행하지 않고 꼬리질문 계약만 생성."""
+    followup_contract = _build_followup(
+        req,
+        {
+            "strengths": req.strengths,
+            "gaps": req.gaps,
+            "rubric": req.rubric,
+        },
+    )
+    if followup_contract is None:
+        return FollowupResponse()
+
+    (
+        followup,
+        followup_type,
+        followup_focus,
+        followup_points,
+        followup_speech_term_aliases,
+    ) = followup_contract
+    return FollowupResponse(
+        followup=followup,
+        followup_question_type=followup_type,
+        followup_focus=followup_focus,
+        followup_expected_answer_points=followup_points,
+        followup_speech_term_aliases=followup_speech_term_aliases,
     )
