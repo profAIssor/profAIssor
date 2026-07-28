@@ -63,6 +63,8 @@ class QuestionRequest(BaseModel):
     language: SparringLanguage = "ko"
     field: Optional[AcademicField] = None
     excluded_questions: List[str] = Field(default_factory=list)
+    # 무상태 API에서도 최근 문답의 흐름을 이어가기 위한 프론트 요약.
+    conversation_summary: str = Field(default="", max_length=6000)
 
 
 class SpeechTermAlias(BaseModel):
@@ -70,6 +72,14 @@ class SpeechTermAlias(BaseModel):
 
     canonical: str
     aliases: List[str] = Field(default_factory=list)
+
+
+class ExpectedPointAssessment(BaseModel):
+    """질문의 기대 답변 요소 하나에 대한 검증된 충족 판정."""
+
+    point_index: int = Field(ge=0)
+    covered: bool
+    answer_evidence: str = ""
 
 
 class QuestionResponse(BaseModel):
@@ -117,6 +127,9 @@ class EvaluateResponse(BaseModel):
     gaps: str
     answer_status: AnswerStatus = "answered"
     rubric: Dict[str, str] = Field(default_factory=dict)
+    expected_point_assessments: List[ExpectedPointAssessment] = Field(
+        default_factory=list
+    )
     next_action: EvaluationNextAction = "finish"
 
     # 정상 답변 뒤 심화·확장 꼬리질문 계약
@@ -147,6 +160,9 @@ class FollowupRequest(EvaluateRequest):
     strengths: str = ""
     gaps: str = ""
     rubric: Dict[str, str] = Field(default_factory=dict)
+    expected_point_assessments: List[ExpectedPointAssessment] = Field(
+        default_factory=list
+    )
 
 
 class FollowupResponse(BaseModel):

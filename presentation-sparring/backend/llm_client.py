@@ -336,6 +336,32 @@ def _shorten(text: str, limit: int = 45) -> str:
     return normalized[:limit].rstrip() + "…"
 
 
+def _with_korean_particle(text: str, pair: str) -> str:
+    """마지막 한글 음절의 받침에 따라 이/가·을/를·과/와를 선택."""
+    particles = {
+        "이/가": ("이", "가"),
+        "을/를": ("을", "를"),
+        "과/와": ("과", "와"),
+    }
+    consonant_particle, vowel_particle = particles[pair]
+    normalized = text.rstrip()
+    if not normalized:
+        return normalized
+    last_character = normalized[-1]
+    if "가" <= last_character <= "힣":
+        has_final_consonant = (
+            ord(last_character) - ord("가")
+        ) % 28 != 0
+        particle = (
+            consonant_particle
+            if has_final_consonant
+            else vowel_particle
+        )
+    else:
+        particle = vowel_particle
+    return normalized + particle
+
+
 _MOCK_QUESTION_TYPES = {
     "evidence",
     "counterexample",
@@ -363,7 +389,7 @@ def _mock_question_type(system: str) -> str:
                 # mock 반례 질문 대신 확장 적용형으로 낮춤
                 if (
                     candidate == "counterexample"
-                    and "[난이도: 쉬움]" in system
+                    and "[난이도: 쉬움" in system
                 ):
                     return "application"
 
@@ -375,6 +401,7 @@ def _mock_question_type(system: str) -> str:
 def _mock_question(system: str, user: str) -> dict:
     """persona 우선순위와 전체 슬라이드 흐름을 반영한 mock 질문을 생성"""
     question_type = _mock_question_type(system)
+    is_english = "[Output language]" in system
 
     slide_matches = re.findall(
         r"\[슬라이드\s+(\d+)\]\s*(.*?)(?=\n\[슬라이드\s+\d+\]|\n\n\[제외할 이전 질문\]|\Z)",
@@ -402,29 +429,67 @@ def _mock_question(system: str, user: str) -> dict:
         second_text = (
             _shorten(slide_matches[1][1], limit=45)
             if len(slide_matches) > 1
-            else f"아직 묻지 않은 핵심 요소 {excluded_count + 1}"
+            else (
+                f"an unasked key point {excluded_count + 1}"
+                if is_english
+                else f"아직 묻지 않은 핵심 요소 {excluded_count + 1}"
+            )
         )
-        subject = f"{first_text}와 {second_text}의 연결"
+        subject = (
+            f"the relationship between {first_text} and {second_text}"
+            if is_english
+            else (
+                f"{_with_korean_particle(first_text, '과/와')} "
+                f"{second_text}의 연결"
+            )
+        )
     else:
         representative_index = None
-        subject = "발표의 핵심 내용과 전체 흐름"
+        subject = (
+            "the presentation's main point and overall flow"
+            if is_english
+            else "발표의 핵심 내용과 전체 흐름"
+        )
 
-    templates = {
-        "definition": (
-            f"자료 전체 흐름을 기준으로 {subject}에서 가장 중요한 개념 차이를 "
-            "설명해 주실 수 있나요?"
-        ),
-        "evidence": (
-            f"자료 전체 흐름에서 {subject}을 뒷받침하는 가장 직접적인 근거 하나는 무엇인가요?"
-        ),
-        "counterexample": (
-            f"자료에 제시된 조건을 기준으로 {subject}이 성립하지 않을 수 있는 "
-            "예외 한 가지는 무엇인가요?"
-        ),
-        "application": (
-            f"자료에서 설명한 {subject}을 관련 예시에 적용하면 어떻게 판단할 수 있나요?"
-        ),
-    }
+    if is_english:
+        templates = {
+            "definition": (
+                f"Based on the overall presentation, what is the most important "
+                f"conceptual distinction in {subject}?"
+            ),
+            "evidence": (
+                f"What is the most direct evidence in the presentation that "
+                f"supports {subject}?"
+            ),
+            "counterexample": (
+                f"Under what condition in the presentation might {subject} "
+                "no longer hold?"
+            ),
+            "application": (
+                f"How would you apply {subject} to a related example from the "
+                "presentation?"
+            ),
+        }
+    else:
+        templates = {
+            "definition": (
+                f"자료 전체 흐름을 기준으로 {subject}에서 가장 중요한 개념 차이를 "
+                "설명해 주실 수 있나요?"
+            ),
+            "evidence": (
+                f"자료 전체 흐름에서 {_with_korean_particle(subject, '을/를')} "
+                "뒷받침하는 가장 직접적인 근거 하나는 무엇인가요?"
+            ),
+            "counterexample": (
+                f"자료에 제시된 조건을 기준으로 {_with_korean_particle(subject, '이/가')} "
+                "성립하지 않을 수 있는 "
+                "예외 한 가지는 무엇인가요?"
+            ),
+            "application": (
+                f"자료에서 설명한 {_with_korean_particle(subject, '을/를')} "
+                "관련 예시에 적용하면 어떻게 판단할 수 있나요?"
+            ),
+        }
 
     return {
         "question": templates[question_type],
@@ -433,8 +498,20 @@ def _mock_question(system: str, user: str) -> dict:
         "question_focus": subject,
         "context_slides": context_slides,
         "expected_answer_points": [
-            first_text if slide_matches else "발표의 핵심 내용",
-            second_text if slide_matches else "핵심 내용 사이의 관계",
+            first_text
+            if slide_matches
+            else (
+                "The presentation's main point"
+                if is_english
+                else "발표의 핵심 내용"
+            ),
+            second_text
+            if slide_matches
+            else (
+                "The relationship between the main points"
+                if is_english
+                else "핵심 내용 사이의 관계"
+            ),
         ],
     }
 
@@ -607,18 +684,85 @@ def _mock_is_nuanced_unknown(answer: str) -> bool:
     return len(stripped) < 20
 
 
-def _mock_unknown_retry(user: str) -> tuple[str, str]:
+def _mock_unknown_retry(
+    user: str,
+    language: str = "ko",
+) -> tuple[str, str]:
     """답변 불가 뒤 동일 주제를 한 단계 낮춘 mock 재질문 생성."""
     focus = _shorten(
         _extract_section(user, "질문 초점"),
         limit=55,
     )
 
+    if language == "en":
+        return (
+            f"Based on the hint, what is one basic meaning or relationship "
+            f"within {focus}?",
+            "definition",
+        )
     return (
         f"힌트를 바탕으로, {focus}에서 가장 기본이 되는 의미나 관계 한 가지만 "
         "말씀해 주실 수 있나요?",
         "definition",
     )
+
+
+def _mock_deferred_followup(system: str, user: str) -> dict:
+    """현재 분리된 /api/followup 프롬프트 계약에 맞춘 mock 응답."""
+    focus = _extract_section(user, "후속 질문 핵심")
+    if not focus or "구체 보완점 없음" in focus:
+        focus = _extract_section(user, "질문 초점")
+    focus = _shorten(focus, limit=70)
+    is_english = (
+        "Write followup, followup_focus" in system
+        or "[Source terminology and output language]" in system
+    )
+    if is_english:
+        followup = (
+            f"How does {focus} affect the result described in the presentation?"
+        )
+        followup_focus = f"Effect of {focus} on the result"
+        expected_points = [f"How {focus} changes the result"]
+    else:
+        followup = (
+            f"발표 결과와 {focus} 사이의 연결을 "
+            "설명해 주실 수 있나요?"
+        )
+        followup_focus = f"발표 결과와 {focus}의 연결"
+        expected_points = ["두 내용이 연결되는 방식"]
+
+    return {
+        "followup": followup,
+        "followup_question_type": "evidence",
+        "followup_focus": followup_focus,
+        "followup_expected_answer_points": expected_points,
+        "followup_speech_term_aliases": [],
+    }
+
+
+def _mock_expected_point_assessments(user: str) -> list[dict]:
+    """현재 평가 프롬프트의 인덱스 기반 요소 판정을 결정론적으로 근사."""
+    answer = _extract_section(user, "학생 답변")
+    expected = _extract_section(user, "기대 답변 요소")
+    assessments: list[dict] = []
+    for line in expected.splitlines():
+        match = re.match(r"\s*-\s*\[(\d+)\]\s*(.+)", line)
+        if not match:
+            continue
+        point_index = int(match.group(1))
+        point = match.group(2).strip()
+        tokens = re.findall(r"[A-Za-z0-9가-힣]{2,}", point)
+        matched_tokens = [token for token in tokens if token in answer]
+        covered = bool(tokens) and len(matched_tokens) >= min(2, len(tokens))
+        assessments.append(
+            {
+                "point_index": point_index,
+                "required_by_question": True,
+                "covered": covered,
+                "answer_evidence": matched_tokens[0] if covered else "",
+            }
+        )
+    return assessments
 
 
 def _call_mock(
@@ -628,14 +772,21 @@ def _call_mock(
     request_kind: RequestKind,
 ) -> str:
     """API 키 없이 전체 흐름을 검사할 수 있는 JSON 응답을 반환"""
-    _ = model, request_kind
+    _ = model
 
     if '"targets_slide"' in system:
         return json.dumps(_mock_question(system, user), ensure_ascii=False)
 
+    if request_kind == "followup":
+        return json.dumps(
+            _mock_deferred_followup(system, user),
+            ensure_ascii=False,
+        )
+
     if request_kind == "evaluate" or (
         '"verdict"' in system and '"followup"' in system
     ):
+        is_english = "[Output language]" in system
         answer_status = _extract_section(user, "답변 상태 사전 판정")
 
         # 서버가 answered로 사전 판정했더라도, 뉘앙스형 답변 불가라면
@@ -661,27 +812,61 @@ def _call_mock(
             if '"explanation"' in system:
                 recovery = {
                     "explanation": (
-                        f"{focus}에 대한 답은 자료에 제시된 기준을 그대로 적용하는 것입니다. "
-                        "그 기준이 어떤 조건에서 성립하는지와, 조건이 달라질 때 결과가 "
-                        "어떻게 바뀌는지를 함께 정리해 두면 같은 질문에 답할 수 있습니다."
+                        (
+                            f"The answer for {focus} follows the criterion stated "
+                            "in the presentation. Review when that criterion holds "
+                            "and how the result changes when the condition changes."
+                        )
+                        if is_english
+                        else (
+                            f"{focus}에 대한 답은 자료에 제시된 기준을 그대로 적용하는 것입니다. "
+                            "그 기준이 어떤 조건에서 성립하는지와, 조건이 달라질 때 결과가 "
+                            "어떻게 바뀌는지를 함께 정리해 두면 같은 질문에 답할 수 있습니다."
+                        )
                     ),
                     "related_slides": related_slides,
                 }
             elif '"reference_answer"' in system:
-                retry_question, retry_question_type = _mock_unknown_retry(user)
+                retry_question, retry_question_type = _mock_unknown_retry(
+                    user,
+                    "en" if is_english else "ko",
+                )
                 recovery = {
                     "reference_answer": (
-                        f"{focus}에서는 자료에 제시된 기준을 적용해 판단한다."
+                        f"Apply the criterion stated in the presentation to {focus}."
+                        if is_english
+                        else f"{focus}에서는 자료에 제시된 기준을 적용해 판단한다."
                     ),
                     "hint": (
-                        f"{focus}을 판단할 때 자료가 어떤 조건을 먼저 확인하라고 했는지, "
-                        "그 조건이 충족되지 않을 때 무엇이 달라지는지 떠올려 보세요."
+                        (
+                            f"Recall which condition the presentation checks first "
+                            f"for {focus}, and what changes when it is not met."
+                        )
+                        if is_english
+                        else (
+                            f"{_with_korean_particle(focus, '을/를')} 판단할 때 "
+                            "자료가 어떤 조건을 먼저 확인하라고 했는지, "
+                            "그 조건이 충족되지 않을 때 무엇이 달라지는지 떠올려 보세요."
+                        )
                     ),
                     "retry_question": retry_question,
-                    "retry_focus": f"{focus}의 기본 기준 확인",
+                    "retry_focus": (
+                        f"Basic criterion for {focus}"
+                        if is_english
+                        else f"{focus}의 기본 기준 확인"
+                    ),
                     "retry_expected_answer_points": [
-                        f"{focus}에 적용되는 기준 한 가지",
-                        "그 기준이 성립하는 조건",
+                        *(
+                            [
+                                f"One criterion applied to {focus}",
+                                "The condition under which it holds",
+                            ]
+                            if is_english
+                            else [
+                                f"{focus}에 적용되는 기준 한 가지",
+                                "그 기준이 성립하는 조건",
+                            ]
+                        ),
                     ],
                     "retry_speech_term_aliases": [],
                     "related_slides": related_slides,
@@ -705,6 +890,7 @@ def _call_mock(
             )
 
         followup, followup_question_type = _mock_followup(user)
+        expected_point_assessments = _mock_expected_point_assessments(user)
 
         # 충분 판정 유지 및 남은 설정 횟수만큼의 꼬리질문 진행
         if _is_mock_answer_sufficient(user):
@@ -718,6 +904,7 @@ def _call_mock(
                     "related_slides": [],
                     "followup": followup,
                     "followup_question_type": followup_question_type,
+                    "expected_point_assessments": expected_point_assessments,
                     "rubric": {
                         "직접성": "우수",
                         "근거": "보통",
@@ -737,6 +924,7 @@ def _call_mock(
                 "related_slides": [],
                 "followup": followup,
                 "followup_question_type": followup_question_type,
+                "expected_point_assessments": expected_point_assessments,
                 "rubric": {
                     "직접성": "보통",
                     "근거": "부족",

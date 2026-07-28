@@ -49,6 +49,12 @@ export interface SpeechTermAlias {
   aliases: string[]
 }
 
+export interface ExpectedPointAssessment {
+  point_index: number
+  covered: boolean
+  answer_evidence: string
+}
+
 export interface QuestionResponse {
   question: string
   question_type: QuestionType
@@ -65,6 +71,7 @@ export interface EvaluateResponse {
   gaps: string
   answer_status: AnswerStatus
   rubric: Record<string, string>
+  expected_point_assessments: ExpectedPointAssessment[]
   next_action: EvaluationNextAction
 
   followup: string | null

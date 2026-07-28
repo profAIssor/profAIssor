@@ -96,11 +96,23 @@ const QUESTION_STOPWORDS = new Set([
 // 백엔드는 난이도별로 기본 질문을 재생성하고, 이 값은 이미 받은 질문과
 // 꼬리질문을 화면에 중복 삽입하지 않기 위한 마지막 로컬 안전망입니다.
 const LOCAL_QUESTION_DUPLICATE_THRESHOLD = 0.72
+const CONVERSATION_SUMMARY_TURN_LIMIT = 4
+const CONVERSATION_SUMMARY_TEXT_LIMIT = 320
 
-const DIFFICULTY_LABELS: Record<Difficulty, string> = {
-  easy: '쉬움',
-  medium: '보통',
-  hard: '어려움',
+const DIFFICULTY_LABELS: Record<
+  SparringLanguage,
+  Record<Difficulty, string>
+> = {
+  ko: {
+    easy: '쉬움',
+    medium: '보통',
+    hard: '어려움',
+  },
+  en: {
+    easy: 'Easy',
+    medium: 'Medium',
+    hard: 'Hard',
+  },
 }
 
 /** 질문 문자열의 중복 비교용 정규화. */
@@ -151,6 +163,25 @@ function isNearDuplicateQuestion(
   })
 }
 
+/** 신규 기본 질문이 직전 문답을 이어갈 수 있도록 완료된 최근 대화를 압축. */
+function buildConversationSummary(turns: TranscriptTurn[]): string {
+  return turns
+    .slice(-CONVERSATION_SUMMARY_TURN_LIMIT)
+    .map((item, index) => {
+      const question = item.question
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, CONVERSATION_SUMMARY_TEXT_LIMIT)
+      const answer = item.answer
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, CONVERSATION_SUMMARY_TEXT_LIMIT)
+      const verdict = item.verdict.replace(/\s+/g, ' ').trim()
+      return `${index + 1}. 질문: ${question}\n답변: ${answer}\n판정: ${verdict}`
+    })
+    .join('\n')
+}
+
 /** 구버전 응답에 대한 다음 동작 보정. */
 function resolveNextAction(
   action: EvaluationNextAction | undefined,
@@ -167,48 +198,66 @@ function resolveNextAction(
 
 
 interface RecoveryTip {
-  guide: string
+  guide: Record<SparringLanguage, string>
   example: Record<SparringLanguage, string>
 }
 
 const GENERAL_RECOVERY_TIPS: readonly RecoveryTip[] = [
   {
-    guide: '질문을 한 문장으로 짧게 되짚으면 질문을 정확히 확인하면서 답변을 정리할 시간을 확보할 수 있습니다. 이렇게 말해 보세요: {example}',
+    guide: {
+      ko: '질문을 한 문장으로 짧게 되짚으면 질문을 정확히 확인하면서 답변을 정리할 시간을 확보할 수 있습니다. 이렇게 말해 보세요: {example}',
+      en: 'Briefly restate the question in one sentence to confirm it and give yourself time to organize the answer: {example}',
+    },
     example: {
       ko: '“질문하신 핵심은 …로 이해했습니다.”',
       en: '“If I understand correctly, the key point is …”',
     },
   },
   {
-    guide: '급하게 말을 채우지 말고 한두 박자 쉬어도 괜찮습니다. 숨을 천천히 내쉰 뒤 이렇게 시작해 보세요: {example}',
+    guide: {
+      ko: '급하게 말을 채우지 말고 한두 박자 쉬어도 괜찮습니다. 숨을 천천히 내쉰 뒤 이렇게 시작해 보세요: {example}',
+      en: 'It is fine to pause briefly instead of filling the silence. Breathe out slowly and begin like this: {example}',
+    },
     example: {
       ko: '“먼저 결론부터 말씀드리면…”',
       en: '“The main point is …”',
     },
   },
   {
-    guide: '바로 답이 떠오르지 않으면 답변 범위를 먼저 정한 뒤 첫 번째 내용부터 이어가 보세요: {example}',
+    guide: {
+      ko: '바로 답이 떠오르지 않으면 답변 범위를 먼저 정한 뒤 첫 번째 내용부터 이어가 보세요: {example}',
+      en: 'If the answer does not come immediately, define its scope and start with the first point: {example}',
+    },
     example: {
       ko: '“두 가지로 나누어 말씀드리겠습니다.”',
       en: '“I would break this into two points.”',
     },
   },
   {
-    guide: '질문이 넓거나 의미가 애매하면 다시 확인해도 됩니다. 이는 회피가 아니라 정확한 답변을 위한 과정입니다: {example}',
+    guide: {
+      ko: '질문이 넓거나 의미가 애매하면 다시 확인해도 됩니다. 이는 회피가 아니라 정확한 답변을 위한 과정입니다: {example}',
+      en: 'If the question is broad or ambiguous, ask for clarification. This supports an accurate answer rather than avoiding it: {example}',
+    },
     example: {
       ko: '“말씀하신 부분을 … 관점으로 이해하면 될까요?”',
       en: '“Should I address this from the perspective of …?”',
     },
   },
   {
-    guide: '정확한 세부사항이 떠오르지 않으면 아는 범위와 확인이 필요한 범위를 나누어 답해 보세요: {example}',
+    guide: {
+      ko: '정확한 세부사항이 떠오르지 않으면 아는 범위와 확인이 필요한 범위를 나누어 답해 보세요: {example}',
+      en: 'If an exact detail is unclear, separate what you know from what still needs verification: {example}',
+    },
     example: {
       ko: '“정확한 수치는 추가 확인이 필요하지만, 현재 말씀드릴 수 있는 범위는 …입니다.”',
       en: '“I would need to verify the exact figure, but the key mechanism is …”',
     },
   },
   {
-    guide: '답변을 짧게 정리하려면 결론→이유→예시→결론 순서를 사용해 보세요. 우선 결론 한 문장만 말하면 다음 내용을 이어가기 쉽습니다: {example}',
+    guide: {
+      ko: '답변을 짧게 정리하려면 결론→이유→예시→결론 순서를 사용해 보세요. 우선 결론 한 문장만 말하면 다음 내용을 이어가기 쉽습니다: {example}',
+      en: 'Use conclusion → reason → example → conclusion to keep the answer concise. Start with one sentence stating the conclusion: {example}',
+    },
     example: {
       ko: '“결론부터 말씀드리면 …입니다.”',
       en: '“To start with the conclusion, …”',
@@ -218,21 +267,30 @@ const GENERAL_RECOVERY_TIPS: readonly RecoveryTip[] = [
 
 const SLIDE_RECOVERY_TIPS: readonly RecoveryTip[] = [
   {
-    guide: '관련 슬라이드로 시선을 옮겨 해당 부분을 가리키며 답변을 이어가 보세요: {example}',
+    guide: {
+      ko: '관련 슬라이드로 시선을 옮겨 해당 부분을 가리키며 답변을 이어가 보세요: {example}',
+      en: 'Turn to the relevant slide, point to the applicable section, and continue the answer: {example}',
+    },
     example: {
       ko: '“자료를 기준으로 순서대로 설명드리겠습니다.”',
       en: '“Let me walk through this using the slide.”',
     },
   },
   {
-    guide: '관련 슬라이드를 찾는 동안 먼저 안내 문장을 말해 보세요. 슬라이드를 확인하는 짧은 시간도 자연스러운 발표 진행의 일부입니다: {example}',
+    guide: {
+      ko: '관련 슬라이드를 찾는 동안 먼저 안내 문장을 말해 보세요. 슬라이드를 확인하는 짧은 시간도 자연스러운 발표 진행의 일부입니다: {example}',
+      en: 'Use a transition while locating the relevant slide. A brief moment to check the material is a natural part of presenting: {example}',
+    },
     example: {
       ko: '“질문과 연결되는 자료를 보면서 설명드리겠습니다.”',
       en: '“I will refer to the material connected to your question.”',
     },
   },
   {
-    guide: '표나 그림이 있다면 제목이나 축을 먼저 가리키며 시작해 보세요. 시각 자료를 기준점으로 삼으면 말의 흐름을 다시 잡기 쉽습니다: {example}',
+    guide: {
+      ko: '표나 그림이 있다면 제목이나 축을 먼저 가리키며 시작해 보세요. 시각 자료를 기준점으로 삼으면 말의 흐름을 다시 잡기 쉽습니다: {example}',
+      en: 'For a table or figure, begin by pointing to its title or axis. Using the visual as an anchor can restore your flow: {example}',
+    },
     example: {
       ko: '“이 자료에서 먼저 보셔야 할 부분은 …입니다.”',
       en: '“The first thing to notice here is …”',
@@ -241,7 +299,7 @@ const SLIDE_RECOVERY_TIPS: readonly RecoveryTip[] = [
 ]
 
 function renderRecoveryTip(tip: RecoveryTip, language: SparringLanguage): string {
-  return tip.guide.replace('{example}', tip.example[language])
+  return tip.guide[language].replace('{example}', tip.example[language])
 }
 
 /** 내용 힌트 없이 발표 진행 시간을 확보하는 침묵 회복 팁 생성. */
@@ -302,6 +360,7 @@ export default function SparScreen({
   // 다음 질문 생성을 시작해 사용자가 답변하는 시간과 겹쳐 놓는다.
   const prefetchedQuestionRef = useRef<{
     personaIndex: number
+    transcriptCount: number
     promise: Promise<QuestionResponse | null>
   } | null>(null)
   const startedRef = useRef(false)
@@ -419,12 +478,10 @@ export default function SparScreen({
 
   const registerRootQuestion = (question: string) => {
     if (!question.trim()) return
-    if (!isNearDuplicateQuestion(question, askedRootQuestionsRef.current)) {
-      askedRootQuestionsRef.current = [
-        ...askedRootQuestionsRef.current,
-        question,
-      ]
-    }
+    askedRootQuestionsRef.current = [
+      ...askedRootQuestionsRef.current,
+      question,
+    ]
   }
 
   /**
@@ -448,11 +505,11 @@ export default function SparScreen({
   /**
    * 다음 기본 질문을 백그라운드로 미리 생성.
    *
-   * /api/questions 요청은 현재 답변이나 평가 결과에 의존하지 않고
-   * 중복 제외 목록만 사용하므로, 답변 제출 전에 실행해도 결과가 달라지지 않는다.
-   * 실패는 화면에 노출하지 않고 null로 흡수해, 실제 소비 시점의 일반 호출로 되돌린다.
+   * 프리페치 당시 완료된 문답 수를 함께 저장합니다. 답변 제출로 기록이
+   * 바뀌면 오래된 프리페치는 소비하지 않고 최신 문맥으로 다시 요청합니다.
    */
   const prefetchNextQuestion = (targetPersonaIndex: number) => {
+    const transcriptCount = transcriptRef.current.length
     const promise = fetchQuestion(
       script,
       slides,
@@ -462,10 +519,12 @@ export default function SparScreen({
       language,
       // 프리페치 시점의 목록을 고정해, 이후 참조 변경의 영향을 받지 않게 한다
       [...askedRootQuestionsRef.current],
+      buildConversationSummary(transcriptRef.current),
     ).catch(() => null)
 
     prefetchedQuestionRef.current = {
       personaIndex: targetPersonaIndex,
+      transcriptCount,
       promise,
     }
   }
@@ -519,14 +578,14 @@ export default function SparScreen({
     setBusy(true)
     setError(null)
     try {
-      // 같은 평가자를 대상으로 한 프리페치가 있으면 재사용한다.
-      // 프리페치 이후에는 꼬리질문만 진행되고 기본 질문은 추가되지 않으므로
-      // 중복 제외 목록이 그대로 유효하다.
+      // 평가자와 완료 문답 수가 모두 같은 프리페치만 재사용합니다.
       const cached = prefetchedQuestionRef.current
       prefetchedQuestionRef.current = null
 
       let response: QuestionResponse | null =
-        cached && cached.personaIndex === targetPersonaIndex
+        cached &&
+        cached.personaIndex === targetPersonaIndex &&
+        cached.transcriptCount === transcriptRef.current.length
           ? await cached.promise
           : null
 
@@ -540,6 +599,42 @@ export default function SparScreen({
           field,
           language,
           askedRootQuestionsRef.current,
+          buildConversationSummary(transcriptRef.current),
+        )
+      }
+
+      // 중복 질문은 화면에 표시하거나 기록에서 누락시키지 않고, 표시 전에
+      // 해당 후보까지 제외 목록에 넣어 한 번 더 생성합니다.
+      if (
+        isNearDuplicateQuestion(
+          response.question,
+          askedRootQuestionsRef.current,
+        )
+      ) {
+        response = await fetchQuestion(
+          script,
+          slides,
+          personaIds[targetPersonaIndex],
+          difficulty,
+          field,
+          language,
+          [
+            ...askedRootQuestionsRef.current,
+            response.question,
+          ],
+          buildConversationSummary(transcriptRef.current),
+        )
+      }
+      if (
+        isNearDuplicateQuestion(
+          response.question,
+          askedRootQuestionsRef.current,
+        )
+      ) {
+        throw new Error(
+          isEnglish
+            ? 'A sufficiently different new question could not be generated. Please try again.'
+            : '이전 질문과 겹치지 않는 새 질문을 만들지 못했습니다. 다시 시도해 주세요.',
         )
       }
 
@@ -756,10 +851,14 @@ export default function SparScreen({
         pushMessage({
           role: 'verdict',
           personaId,
-          text: '아래 단서를 바탕으로 현재 질문의 답을 한 단계씩 유추해 보세요.',
+          text: isEnglish
+            ? 'Use the hint below to work toward the answer one step at a time.'
+            : '아래 단서를 바탕으로 현재 질문의 답을 한 단계씩 유추해 보세요.',
           answerStatus: 'unknown',
           supplement: evaluation.supplement,
-          supplementTitle: '생각해 볼 단서',
+          supplementTitle: isEnglish
+            ? 'Hint to consider'
+            : '생각해 볼 단서',
           relatedSlides: evaluation.related_slides,
         })
 
@@ -805,13 +904,17 @@ export default function SparScreen({
         pushMessage({
           role: 'verdict',
           personaId,
-          text: '재질문에도 답변하지 못했습니다. 아래 개념 설명을 확인한 뒤 이 질문과 관련된 내용을 다시 학습해 주세요.',
+          text: isEnglish
+            ? 'The retry was not answered. Review the explanation below and revisit the related concept.'
+            : '재질문에도 답변하지 못했습니다. 아래 개념 설명을 확인한 뒤 이 질문과 관련된 내용을 다시 학습해 주세요.',
           answerStatus: 'unknown',
           supplement: evaluation.supplement,
-          supplementTitle: '개념 정리',
+          supplementTitle: isEnglish ? 'Concept review' : '개념 정리',
           learningNote:
             evaluation.gaps ||
-            '이 질문과 관련된 개념을 발표 전에 다시 학습해 주세요.',
+            (isEnglish
+              ? 'Review the concept related to this question before presenting.'
+              : '이 질문과 관련된 개념을 발표 전에 다시 학습해 주세요.'),
           relatedSlides: evaluation.related_slides,
         })
       } else {
@@ -819,13 +922,17 @@ export default function SparScreen({
           role: 'verdict',
           personaId,
           text: isUnknown
-            ? '현재 답변에서는 질문의 핵심을 확인하기 어려웠습니다.'
-            : `평가: ${evaluation.verdict} ✅ ${evaluation.strengths} ⚠️ ${evaluation.gaps}`,
+            ? isEnglish
+              ? 'The current answer does not show the key point of the question.'
+              : '현재 답변에서는 질문의 핵심을 확인하기 어려웠습니다.'
+            : `${isEnglish ? 'Evaluation' : '평가'}: ${evaluation.verdict} ✅ ${evaluation.strengths} ⚠️ ${evaluation.gaps}`,
           rubric: isUnknown ? undefined : evaluation.rubric,
           answerStatus: evaluation.answer_status,
           supplement: evaluation.supplement,
           supplementTitle: evaluation.supplement
-            ? '개념 정리'
+            ? isEnglish
+              ? 'Concept review'
+              : '개념 정리'
             : undefined,
           relatedSlides: evaluation.related_slides,
         })
@@ -929,6 +1036,8 @@ export default function SparScreen({
               strengths: evaluation.strengths,
               gaps: evaluation.gaps,
               rubric: evaluation.rubric,
+              expectedPointAssessments:
+                evaluation.expected_point_assessments ?? [],
             })
           } catch (exception) {
             setError(
@@ -1039,17 +1148,26 @@ export default function SparScreen({
               <span
                 className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-600"
               >
-                난이도 {DIFFICULTY_LABELS[difficulty]}
+                {isEnglish ? 'Difficulty' : '난이도'}{' '}
+                {DIFFICULTY_LABELS[language][difficulty]}
               </span>
             </div>
             <div className="text-sm text-slate-500">
-              남은 질문 횟수 {remainingQuestionCount}회
+              {isEnglish
+                ? `Remaining questions: ${remainingQuestionCount}`
+                : `남은 질문 횟수 ${remainingQuestionCount}회`}
               <span className="ml-1.5 text-xs text-slate-400">
                 {readyForReport
-                  ? '(모든 질문 완료)'
+                  ? isEnglish
+                    ? '(all questions completed)'
+                    : '(모든 질문 완료)'
                   : isUnknownRetryQuestion
-                    ? '(현재 재질문은 차감 제외)'
-                    : '(현재 질문 포함)'}
+                    ? isEnglish
+                      ? '(current retry is not counted)'
+                      : '(현재 재질문은 차감 제외)'
+                    : isEnglish
+                      ? '(including the current question)'
+                      : '(현재 질문 포함)'}
               </span>
             </div>
           </div>
@@ -1133,7 +1251,10 @@ export default function SparScreen({
                   {message.supplement && (
                     <div className="rounded-lg border border-indigo-100 bg-white px-3.5 py-3">
                       <div className="mb-1.5 text-sm font-bold text-indigo-700">
-                        {message.supplementTitle ?? '생각해 볼 기본 아이디어'}
+                        {message.supplementTitle ??
+                          (isEnglish
+                            ? 'Key idea to consider'
+                            : '생각해 볼 기본 아이디어')}
                       </div>
                       <div className="whitespace-pre-wrap text-slate-700">
                         {message.supplement}
@@ -1150,9 +1271,15 @@ export default function SparScreen({
 
                   {message.answerStatus === 'unknown' && relatedSlides.length > 0 && (
                     <div className="text-sm text-slate-600">
-                      관련 발표 자료:{' '}
+                      {isEnglish
+                        ? 'Related presentation material: '
+                        : '관련 발표 자료: '}
                       {relatedSlides
-                        .map((slide) => `${slide}번 슬라이드`)
+                        .map((slide) =>
+                          isEnglish
+                            ? `Slide ${slide}`
+                            : `${slide}번 슬라이드`,
+                        )
                         .join(', ')}
                     </div>
                   )}
@@ -1233,10 +1360,14 @@ export default function SparScreen({
         <div className="flex shrink-0 flex-col gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-base font-bold text-slate-800">
-              모든 질의응답이 완료되었습니다.
+              {isEnglish
+                ? 'All questions and answers are complete.'
+                : '모든 질의응답이 완료되었습니다.'}
             </div>
             <div className="mt-1 text-sm leading-relaxed text-slate-600">
-              마지막 답변의 피드백을 확인한 뒤 종합 리포트로 이동해 주세요.
+              {isEnglish
+                ? 'Review the final feedback, then continue to the full report.'
+                : '마지막 답변의 피드백을 확인한 뒤 종합 리포트로 이동해 주세요.'}
             </div>
           </div>
           <button
@@ -1244,7 +1375,7 @@ export default function SparScreen({
             onClick={openReport}
             className="flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-indigo-700"
           >
-            종합 리포트 보기
+            {isEnglish ? 'View full report' : '종합 리포트 보기'}
           </button>
         </div>
       ) : (

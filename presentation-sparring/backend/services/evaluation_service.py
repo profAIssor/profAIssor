@@ -9,12 +9,10 @@ from fastapi import HTTPException
 import llm_client
 import material_context
 import prompts
-from core.prompt_rules import get_source_term_preservation
 from personas import (
+    build_persona_system,
     get_allowed_question_types,
-    get_field_hint,
     get_model_hint,
-    get_persona,
     get_question_policy_prompt,
 )
 from schemas import (
@@ -109,6 +107,51 @@ def _parse_expected_point_assessments(
         parsed[point_index] = covered
 
     return parsed
+
+
+def _serialize_expected_point_assessments(
+    raw,
+    expected_answer_points: List[str],
+    answer: str,
+) -> List[dict]:
+    """검증을 통과한 요소별 판정만 API 전달용 목록으로 정규화."""
+    parsed = _parse_expected_point_assessments(
+        raw,
+        expected_answer_points,
+        answer,
+    )
+    if not parsed or not isinstance(raw, list):
+        return []
+
+    evidence_by_index: Dict[int, str] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        point_index = item.get("point_index")
+        if isinstance(point_index, str) and point_index.strip().isdigit():
+            point_index = int(point_index.strip())
+        covered = item.get("covered")
+        evidence = item.get("answer_evidence")
+        if (
+            isinstance(point_index, int)
+            and not isinstance(point_index, bool)
+            and parsed.get(point_index) is covered
+            and isinstance(evidence, str)
+        ):
+            evidence_by_index[point_index] = re.sub(
+                r"\s+",
+                " ",
+                evidence,
+            ).strip()
+
+    return [
+        {
+            "point_index": point_index,
+            "covered": covered,
+            "answer_evidence": evidence_by_index.get(point_index, ""),
+        }
+        for point_index, covered in sorted(parsed.items())
+    ]
 
 
 _VISIBLE_PLACEHOLDER_PATTERN = re.compile(r"<[^<>]{2,}>")
@@ -284,7 +327,8 @@ def _retry_keeps_multi_item_load(
 ) -> bool:
     """쉬운 재질문이 둘 이상의 항목을 한꺼번에 요구하는지 확인."""
     multi_item_pattern = re.compile(
-        r"(?:두|세|네|여러|모든|각각|몇\s*가지|"
+        r"(?:(?:두|세|네)\s*(?:가지|개|항목|요소|방법|이유|조건|근거)|"
+        r"(?<![가-힣])(?:여러|모든|각각)(?![가-힣])|몇\s*(?:가지|개)|"
         r"\b(?:two|three|four|several|all)\b)",
         re.IGNORECASE,
     )
@@ -358,7 +402,7 @@ def _hard_retry_is_too_easy(
         )
 
     if re.search(
-        r"(?:명칭|용어|이름|무엇인가요|무엇입니까|한\s*가지는\s*무엇)",
+        r"(?:명칭|용어|이름).{0,20}(?:무엇인가요|무엇입니까|말해|밝혀)",
         normalized,
     ):
         return True
@@ -370,14 +414,31 @@ def _hard_retry_is_too_easy(
     )
 
 
+def _student_visible_focus(
+    text: str,
+    *,
+    max_chars: int = 120,
+) -> str:
+    """내부 라벨 중 학생 질문의 짧은 주제로 안전하게 쓸 수 있는 문구만 유지."""
+    normalized = re.sub(r"\s+", " ", text or "").strip(" .,:;-")
+    if not normalized or len(normalized) > max_chars:
+        return ""
+    if re.search(r"[?？!！]", normalized):
+        return ""
+    # 완결된 설명문을 조사와 다시 결합하지 않습니다.
+    if re.search(r"(?:습니다|합니다|됩니다|입니다|있습니다|없습니다|다|요)$", normalized):
+        return ""
+    return normalized
+
+
 def _fallback_unknown_retry(
     question_focus: str,
     current_type: QuestionType,
     language: str = "ko",
 ) -> tuple[str, str, List[str]]:
     """현재 질문의 사고 단계를 한 단계 낮춘 재질문 계약 생성."""
-    focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
-    subject = focus or "현재 질문의 핵심 내용"
+    focus = _student_visible_focus(question_focus)
+    subject = focus or "현재 질문의 핵심 개념"
     if language == "en":
         english_subject = focus or "the key point of the question"
         english_templates: Dict[QuestionType, tuple[str, str, List[str]]] = {
@@ -405,12 +466,12 @@ def _fallback_unknown_retry(
         return english_templates[current_type]
     templates: Dict[QuestionType, tuple[str, str, List[str]]] = {
         "definition": (
-            f"{subject}이 실제로 하는 역할 한 가지를 먼저 설명해 주실 수 있나요?",
+            f"{subject}의 역할 중 한 가지를 먼저 설명해 주실 수 있나요?",
             f"{subject}의 핵심 역할 확인",
             ["개념이 수행하는 역할 한 가지"],
         ),
         "evidence": (
-            f"{subject}에 대해 원인과 결과를 이어 주는 자료 속 단서 한 가지는 무엇인가요?",
+            f"{subject}와 관련해 원인과 결과를 이어 주는 자료 속 단서 한 가지는 무엇인가요?",
             f"{subject}의 원인과 결과를 잇는 근거 확인",
             ["발표 자료에 제시된 근거 한 가지", "그 근거가 결론과 연결되는 이유"],
         ),
@@ -420,7 +481,7 @@ def _fallback_unknown_retry(
             ["설명이 달라질 수 있는 조건 한 가지", "그 조건에서 달라지는 결과"],
         ),
         "application": (
-            f"{subject}을 판단할 때 사용할 수 있는 기준 한 가지는 무엇인가요?",
+            f"{subject}에 적용할 수 있는 판단 기준 한 가지는 무엇인가요?",
             f"{subject}에 적용할 판단 기준 확인",
             ["원래 설명에서 가져온 판단 기준 한 가지", "그 기준이 현재 상황과 연결되는 이유"],
         ),
@@ -636,7 +697,10 @@ def _build_unknown_retry(
         query=req.question_focus or req.question,
     )
     source_question = req.question.strip()
-    focus = req.question_focus.strip() or source_question[:160]
+    # question_focus는 학생에게 노출할 수 있는 짧은 주제일 때만 사용합니다.
+    # 비어 있을 때 직전 질문 전문을 주어로 재사용하면 내부 문장과 질문이
+    # 결합된 부자연스러운 폴백이 만들어지므로 일반 주제로 되돌립니다.
+    focus = _student_visible_focus(req.question_focus)
 
     # 평가 호출에서 함께 받은 회복 계약. 없으면 전부 결정론적 기본값으로 대체한다.
     data: dict = recovery if isinstance(recovery, dict) else {}
@@ -658,6 +722,14 @@ def _build_unknown_retry(
         current_type,
         req.language,
     )
+    if (
+        req.language == "ko"
+        and _has_malformed_korean_question(fallback_question)
+    ):
+        fallback_question = (
+            "현재 질문의 핵심 개념이 어떤 역할을 하는지 "
+            "한 가지만 설명해 주실 수 있나요?"
+        )
     reference_answer_raw = data.get("reference_answer")
     reference_answer = (
         reference_answer_raw.strip()
@@ -712,6 +784,10 @@ def _build_unknown_retry(
                 retry_question,
             )
         )
+        or (
+            req.language == "ko"
+            and _has_malformed_korean_question(retry_question)
+        )
         or _is_duplicate_question(retry_question, [source_question], threshold=0.84)
         or _retry_keeps_multi_item_load(
             retry_question,
@@ -751,32 +827,36 @@ def _build_unknown_retry(
         if req.difficulty == "hard":
             explicit_subject = (
                 focus
-                or source_question.rstrip("?.! ")
                 or retry_focus.strip()
+                or (
+                    "the key point of the question"
+                    if req.language == "en"
+                    else "현재 질문의 핵심 내용"
+                )
             )
             if req.language == "en":
                 retry_question = (
-                    f"For {explicit_subject}, how does the specific mechanism "
-                    "described in the reference answer lead to its stated result?"
+                    f"For {explicit_subject}, under what condition could the "
+                    "result described in the presentation change, and why?"
                 )
                 retry_focus = (
-                    f"Mechanism and result for {explicit_subject}"
+                    f"Condition affecting the result for {explicit_subject}"
                 )
             else:
                 retry_question = (
-                    f"{explicit_subject}에서 사용되는 기술의 작동 원리와 "
-                    "인과 관계를 구체적으로 설명해 주세요."
+                    f"{explicit_subject}의 결과가 달라질 수 있는 핵심 조건과 "
+                    "그 이유를 설명해 주세요."
                 )
-                retry_focus = f"{explicit_subject}의 작동 방식과 결과의 연결"
+                retry_focus = f"{explicit_subject}의 결과가 달라지는 조건"
             if req.language == "en":
                 retry_points = [
-                    f"Specific mechanism used for {explicit_subject}",
-                    "How that mechanism leads to the stated result",
+                    f"One condition affecting the result for {explicit_subject}",
+                    "Why the result changes under that condition",
                 ]
             else:
                 retry_points = [
-                    f"{explicit_subject}에 사용되는 구체적인 작동 방식",
-                    "그 작동 방식이 자료의 결과로 이어지는 이유",
+                    f"{explicit_subject}의 결과에 영향을 주는 조건",
+                    "그 조건에서 결과가 달라지는 이유",
                 ]
             retry_type = "evidence"
         else:
@@ -784,6 +864,19 @@ def _build_unknown_retry(
             retry_type = current_type
             retry_focus = fallback_focus
             retry_points = fallback_points
+        if (
+            req.language == "ko"
+            and _has_malformed_korean_question(retry_question)
+        ):
+            retry_question = (
+                "현재 질문의 핵심 결과가 달라질 수 있는 조건과 "
+                "그 이유를 설명해 주세요."
+            )
+            retry_focus = "현재 질문의 결과가 달라지는 조건"
+            retry_points = [
+                "결과에 영향을 주는 조건",
+                "그 조건에서 결과가 달라지는 이유",
+            ]
     else:
         retry_type = _parse_question_type(
             data.get("retry_question_type"),
@@ -936,7 +1029,7 @@ _GAP_CLEANUP_SUFFIXES = (
 )
 
 
-def _extract_gap_focus(raw_gap: str) -> str:
+def _extract_gap_focus(raw_gap: str, language: str = "ko") -> str:
     """평가 보완점에서 다음 질문에 사용할 핵심 누락 추출."""
     normalized = re.sub(
         r"[✅⚠️❗️]+",
@@ -949,6 +1042,23 @@ def _extract_gap_focus(raw_gap: str) -> str:
 
     # 여러 보완점 중 첫 번째 구체 항목 우선 선택
     first_part = re.split(r"(?<=[.!?。])\s+|[•·]\s*", normalized)[0]
+    if language == "en":
+        first_part = re.sub(
+            r"^(?:however|but|also|additionally)\s*,?\s*",
+            "",
+            first_part,
+            flags=re.IGNORECASE,
+        ).strip(" .,:;-")
+        first_part = re.sub(
+            r"\s+(?:is|was)\s+(?:missing|unclear|insufficient)$"
+            r"|\s+(?:needs?|requires?)\s+(?:more\s+)?"
+            r"(?:detail|explanation|evidence)$",
+            "",
+            first_part,
+            flags=re.IGNORECASE,
+        )
+        return first_part[:180].strip(" .,:;-")
+
     first_part = re.sub(
         r"^(다만|하지만|그러나|또한|그리고)\s*",
         "",
@@ -968,20 +1078,29 @@ def _extract_gap_focus(raw_gap: str) -> str:
     return first_part[:180].strip(" .,:;-")
 
 
-def _has_meaningful_gap(raw_gap: str) -> bool:
+def _has_meaningful_gap(raw_gap: str, language: str = "ko") -> bool:
     """후속 질문으로 확인할 가치가 있는 구체 보완점 판정."""
-    focus = _extract_gap_focus(raw_gap)
+    focus = _extract_gap_focus(raw_gap, language)
     if len(focus) < 6:
         return False
 
-    generic_phrases = {
+    if language == "en":
+        generic_phrases = {
+            "none",
+            "no gaps",
+            "nothing to add",
+            "adequately explained",
+            "generally appropriate",
+        }
+        return focus.lower() not in generic_phrases
+
+    return focus not in {
         "보완할 점이 없음",
         "특별한 보완점이 없음",
         "충분히 설명함",
         "전반적으로 적절함",
         "없음",
     }
-    return focus not in generic_phrases
 
 
 def _focus_tokens(text: str) -> set[str]:
@@ -1024,9 +1143,37 @@ def _gap_point_score(
     return len(gap_tokens & point_tokens) / len(point_tokens)
 
 
-def _clean_single_focus(text: str) -> str:
+def _clean_single_focus(text: str, language: str = "ko") -> str:
     """후속 질문용 단일 초점 문구 정리."""
     normalized = re.sub(r"\s+", " ", text or "").strip(" .,:;-")
+    if language == "en":
+        normalized = re.sub(
+            r"^(?:especially|however|but|also|additionally)\s*,?\s*",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(
+            r"\s+(?:is|was)\s+(?:missing|unclear|insufficient)$"
+            r"|\s+(?:needs?|requires?)\s+(?:more\s+)?"
+            r"(?:detail|explanation|evidence)$",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        ).strip(" .,:;-")
+        parts = re.split(
+            r"\s*(?:,|;|/|\band\b|\bor\b)\s*",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        candidates = [
+            part.strip(" .,:;-")
+            for part in parts
+            if len(part.strip(" .,:;-")) >= 3
+        ]
+        selected = candidates[0] if candidates else normalized
+        return selected[:100].strip(" .,:;-")
+
     normalized = re.sub(
         r"^(특히|다만|하지만|그러나|또한|그리고)\s*",
         "",
@@ -1602,7 +1749,7 @@ def _select_single_followup_focus(
     assessments = point_assessments or {}
     expected_candidates: List[tuple[int, str]] = []
     for index, point in enumerate(req.expected_answer_points):
-        cleaned = _clean_single_focus(point)
+        cleaned = _clean_single_focus(point, req.language)
         if cleaned and assessments.get(index) is not True:
             expected_candidates.append((index, cleaned))
 
@@ -1632,12 +1779,13 @@ def _select_single_followup_focus(
         if sentence.strip()
     ]
     for sentence in reversed(gap_sentences):
-        candidate = _clean_single_focus(sentence)
+        candidate = _clean_single_focus(sentence, req.language)
         if candidate and len(candidate) >= 4:
             return candidate
 
     fallback = _clean_single_focus(
-        req.question_focus or _extract_gap_focus(raw_gap)
+        req.question_focus or _extract_gap_focus(raw_gap, req.language),
+        req.language,
     )
     return fallback or "앞선 질문의 핵심 개념"
 
@@ -1659,11 +1807,38 @@ _MEDIUM_REQUEST_TERMS = (
 )
 
 
-def _is_compound_medium_followup(question: str) -> bool:
+def _is_compound_medium_followup(
+    question: str,
+    language: str = "ko",
+) -> bool:
     """보통 난이도 복합 요구 질문 판정."""
     normalized = re.sub(r"\s+", " ", question or "").strip()
     if not normalized:
         return True
+
+    if language == "en":
+        if len(normalized) > 220 or normalized.count("?") > 1:
+            return True
+        if normalized.count(",") >= 3:
+            return True
+        request_terms = {
+            term
+            for term in (
+                "definition",
+                "reason",
+                "evidence",
+                "example",
+                "condition",
+                "limitation",
+                "difference",
+                "application",
+                "impact",
+                "effect",
+                "role",
+            )
+            if re.search(rf"\b{term}s?\b", normalized, re.IGNORECASE)
+        }
+        return len(request_terms) >= 3
 
     if len(normalized) > 95:
         return True
@@ -1747,7 +1922,10 @@ def _natural_followup_subject(
     gap_tokens = _focus_tokens(gap_focus)
 
     for candidate in candidates:
-        cleaned = _clean_single_focus(candidate)
+        cleaned = _student_visible_focus(
+            _clean_single_focus(candidate, req.language),
+            max_chars=80,
+        )
         if not cleaned:
             continue
 
@@ -1772,7 +1950,7 @@ def _fallback_gap_followup(
     current_type: QuestionType,
 ) -> tuple[str, QuestionType, str, List[str]]:
     """실제 발표 현장처럼 단일 보완점을 자연스럽게 묻는 폴백 생성."""
-    concise_gap = _clean_single_focus(gap_focus)[:90]
+    concise_gap = _clean_single_focus(gap_focus, req.language)[:90]
     subject = _natural_followup_subject(req, concise_gap)
 
     if req.language == "en":
@@ -1850,7 +2028,7 @@ def _fallback_required_followup(
     language: str = "ko",
 ) -> tuple[str, QuestionType, str, List[str]]:
     """정상 답변 이후 심화·확장용 꼬리질문 계약 생성."""
-    focus = re.sub(r"\s+", " ", question_focus.strip())[:120]
+    focus = _student_visible_focus(question_focus)
     subject = focus or "앞선 답변의 핵심 내용"
     next_type = _TYPE_TRANSITIONS[current_type]
     if language == "en":
@@ -1930,7 +2108,7 @@ def _build_followup(
         req.answer,
     )
     has_meaningful_gap = (
-        _has_meaningful_gap(raw_gap)
+        _has_meaningful_gap(raw_gap, req.language)
         and not _gap_repeats_covered_expected_point(
             req,
             raw_gap,
@@ -1946,7 +2124,7 @@ def _build_followup(
             point_assessments,
         )
     else:
-        gap_focus = _extract_gap_focus(raw_gap)
+        gap_focus = _extract_gap_focus(raw_gap, req.language)
 
     if req.language == "en" and has_meaningful_gap:
         # 한국어 평가 문구를 영문 꼬리질문에 직접 삽입하지 않습니다.
@@ -1983,6 +2161,14 @@ def _build_followup(
             current_type,
             req.language,
         )
+    if (
+        req.language == "ko"
+        and _has_malformed_korean_question(fallback_question)
+    ):
+        fallback_question = (
+            "이 핵심 내용이 발표의 결론과 어떻게 연결되는지 "
+            "설명해 주실 수 있나요?"
+        )
     prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
     selected_slides = material_context.select_context_slides(
         prompt_slides,
@@ -1994,8 +2180,10 @@ def _build_followup(
         for slide in selected_slides[:3]
     ) or "(관련 슬라이드 없음)"
 
-    followup_policy = get_question_policy_prompt(
+    persona_system = build_persona_system(
         req.persona_id,
+        req.field,
+        req.language,
         req.difficulty,
     )
     difficulty_followup_rule = {
@@ -2037,6 +2225,7 @@ def _build_followup(
     )
 
     system = (
+        f"[페르소나]\n{persona_system}\n\n"
         "당신은 발표 질의응답의 꼬리질문을 만드는 평가자입니다. "
         "학생은 앞선 기본 질문에 내용 있는 답변을 했습니다. "
         "앞선 질문을 다시 말하거나 같은 정의를 반복해서 묻지 마세요. "
@@ -2049,7 +2238,6 @@ def _build_followup(
         "질문은 발표 자료와 학생 답변으로 답할 수 있어야 하며, 한 문장에 요구를 하나만 포함하세요. "
         "관련 슬라이드의 영문 기술 용어와 고유 명칭은 원문 그대로 유지하고 번역하지 마세요. "
         f"{output_language_rule} "
-        f"{followup_policy} "
         f"{difficulty_followup_rule} "
         'JSON만 반환: {"followup":"<꼬리질문>","followup_question_type":"<evidence|counterexample|application|definition>",'
         '"followup_focus":"<평가 초점>","followup_expected_answer_points":["<요소1>","<요소2>"],'
@@ -2122,7 +2310,7 @@ def _build_followup(
         )
         or (
             req.difficulty in {"medium", "hard"}
-            and _is_compound_medium_followup(followup)
+            and _is_compound_medium_followup(followup, req.language)
         )
     ):
         followup = fallback_question
@@ -2232,15 +2420,11 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
     # 쓰이지 않을 분기는 프롬프트에 넣지 않으므로 출력 토큰도 발생하지 않는다.
     recovery_mode = "closure" if current_role == "retry" else "retry"
 
-    persona = get_persona(req.persona_id)
-    persona_system = (
-        persona["system"]
-        + get_field_hint(req.field)
-        + get_question_policy_prompt(
-            req.persona_id,
-            req.difficulty,
-        )
-        + get_source_term_preservation(req.language)
+    persona_system = build_persona_system(
+        req.persona_id,
+        req.field,
+        req.language,
+        req.difficulty,
     )
     prompt_slides = material_context.build_prompt_slides(req.script, req.slides)
     system, user = prompts.build_evaluate_prompt(
@@ -2311,6 +2495,11 @@ def evaluate_answer(req: EvaluateRequest) -> EvaluateResponse:
         supplement=None,
         related_slides=[],
         rubric=_parse_rubric(data.get("rubric")),
+        expected_point_assessments=_serialize_expected_point_assessments(
+            data.get("expected_point_assessments"),
+            req.expected_answer_points,
+            req.answer,
+        ),
     )
 
     if recovered_substantive_unknown and current_role == "retry":
@@ -2377,6 +2566,10 @@ def generate_followup(req: FollowupRequest) -> FollowupResponse:
             "strengths": req.strengths,
             "gaps": req.gaps,
             "rubric": req.rubric,
+            "expected_point_assessments": [
+                item.model_dump()
+                for item in req.expected_point_assessments
+            ],
         },
     )
     if followup_contract is None:

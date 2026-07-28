@@ -11,13 +11,10 @@ from fastapi import HTTPException
 import llm_client
 import material_context
 import prompts
-from core.prompt_rules import get_source_term_preservation
 from personas import (
+    build_persona_system,
     get_allowed_question_types,
-    get_field_hint,
     get_model_hint,
-    get_persona,
-    get_question_policy_prompt,
 )
 from schemas import (
     QuestionRequest,
@@ -403,14 +400,14 @@ def _question_misses_difficulty_depth(
     if language == "en":
         depth_pattern = re.compile(
             r"\b(?:condition|limitation|failure|exception|assumption|"
-            r"trade-?off|under\s+what|"
+            r"trade-?off|impact|effect|cause|why|how|under\s+what|"
             r"what\s+happens\s+if)\b",
             re.IGNORECASE,
         )
     else:
         depth_pattern = re.compile(
             r"(?:조건|한계|실패|예외|전제|가정|통제|환경|상황|"
-            r"성립|깨지|달라지|비용|부하|성능|"
+            r"성립|깨지|달라지|비용|부하|성능|이유|원인|영향|인과|왜|어떻게|"
             r"trade-?off)"
         )
     return not bool(depth_pattern.search(normalized))
@@ -426,13 +423,16 @@ def _generate_question_data(
     prompt_slides = material_context.build_prompt_slides(
         req.script,
         req.slides,
+        # 전체 대본은 별도 블록으로 전달하므로 슬라이드마다 같은 대본
+        # 구간을 다시 붙이지 않습니다.
+        include_script_segments=False,
     )
     prompt_script = material_context.compact_script(
         req.script
     )
     historical_questions = [
         question.strip()
-        for question in req.excluded_questions
+        for question in req.excluded_questions[-12:]
         if isinstance(question, str) and question.strip()
     ]
 
@@ -442,6 +442,7 @@ def _generate_question_data(
     rejected_target_slides: set[int] = set()
     last_rejection_reason = ""
     last_rejected_candidate = ""
+    last_non_duplicate_candidate: dict | None = None
 
     for attempt in range(4):
         system, user = prompts.build_question_prompt(
@@ -451,6 +452,7 @@ def _generate_question_data(
             difficulty=req.difficulty,
             question_type_priority=question_type_priority,
             excluded_questions=prompt_blocked_questions,
+            conversation_summary=req.conversation_summary,
             language=req.language,
         )
 
@@ -530,6 +532,12 @@ def _generate_question_data(
         ):
             return data
 
+        if similarity < _QUESTION_DUPLICATE_THRESHOLD:
+            # 문장 스타일이나 리터럴 깊이 게이트만 통과하지 못한 후보는
+            # 네 번 모두 재생성에 실패했을 때 사용할 안전 후보로 보존합니다.
+            # 중복 후보는 이 경로에 절대 들어오지 않습니다.
+            last_non_duplicate_candidate = data
+
         last_rejected_candidate = candidate
         if _has_indirect_question_preamble(candidate):
             last_rejection_reason = "style"
@@ -551,6 +559,16 @@ def _generate_question_data(
         # 중복 후보만 다음 프롬프트의 제외 목록에 추가한다.
         prompt_blocked_questions.append(candidate)
 
+    if last_non_duplicate_candidate is not None:
+        logger.warning(
+            "Question validation exhausted; using the last non-duplicate "
+            "candidate (persona=%s difficulty=%s reason=%s)",
+            req.persona_id,
+            req.difficulty,
+            last_rejection_reason,
+        )
+        return last_non_duplicate_candidate
+
     raise HTTPException(
         status_code=502,
         detail=(
@@ -561,15 +579,11 @@ def _generate_question_data(
 
 
 def generate_question(req: QuestionRequest) -> QuestionResponse:
-    persona = get_persona(req.persona_id)
-    persona_system = (
-        persona["system"]
-        + get_field_hint(req.field)
-        + get_question_policy_prompt(
-            req.persona_id,
-            req.difficulty,
-        )
-        + get_source_term_preservation(req.language)
+    persona_system = build_persona_system(
+        req.persona_id,
+        req.field,
+        req.language,
+        req.difficulty,
     )
     question_type_priority = list(
         get_allowed_question_types(

@@ -2,6 +2,8 @@
 
 from typing import Dict, Optional, Tuple
 
+from core.prompt_rules import get_source_term_preservation
+
 
 QuestionTypePriority = Tuple[str, ...]
 QuestionTypePolicy = Dict[str, QuestionTypePriority]
@@ -286,4 +288,20 @@ def get_field_hint(field: Optional[str]) -> str:
         "한 질문에 두 개 이상의 검증 관점을 섞지 말며, "
         "질문의 깊이는 별도의 난이도 지침을 따르세요.\n"
         f"{hint}"
+    )
+
+
+def build_persona_system(
+    persona_id: str,
+    field: Optional[str],
+    language: str,
+    difficulty: str,
+) -> str:
+    """질문·평가·꼬리질문이 공유하는 평가자 시스템 문맥 조립."""
+    persona = get_persona(persona_id)
+    return (
+        str(persona["system"])
+        + get_field_hint(field)
+        + get_question_policy_prompt(persona_id, difficulty)
+        + get_source_term_preservation(language)
     )

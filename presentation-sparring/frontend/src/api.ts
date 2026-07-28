@@ -308,6 +308,7 @@ export function fetchQuestion(
   field: AcademicField | null,
   language: SparringLanguage,
   excludedQuestions: string[] = [],
+  conversationSummary = '',
 ): Promise<QuestionResponse> {
   return post(
     '/api/questions',
@@ -319,6 +320,7 @@ export function fetchQuestion(
       field,
       language,
       excluded_questions: excludedQuestions,
+      conversation_summary: conversationSummary,
     },
     QUESTION_REQUEST_TIMEOUT_MS,
   )
@@ -381,6 +383,8 @@ export function fetchFollowup(
     strengths: string
     gaps: string
     rubric: Record<string, string>
+    expectedPointAssessments:
+      EvaluateResponse['expected_point_assessments']
   },
 ): Promise<FollowupResponse> {
   return post(
@@ -410,6 +414,8 @@ export function fetchFollowup(
       strengths: args.strengths,
       gaps: args.gaps,
       rubric: args.rubric,
+      expected_point_assessments:
+        args.expectedPointAssessments,
     },
     FOLLOWUP_REQUEST_TIMEOUT_MS,
   )

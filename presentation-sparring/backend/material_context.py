@@ -213,14 +213,15 @@ def build_prompt_slides(
     *,
     max_slide_chars: int = 1400,
     max_segment_chars: int = 700,
+    include_script_segments: bool = True,
 ) -> list[Slide]:
-    """질문 생성용 슬라이드 원문과 추정 대본 구간의 내부 결합."""
+    """슬라이드 원문과 선택적인 추정 대본 구간의 내부 결합."""
     alignments = align_script_to_slides(script, slides)
     result: list[Slide] = []
 
     for alignment in alignments:
         text = alignment.slide_text[:max_slide_chars].rstrip()
-        if alignment.script_segment:
+        if include_script_segments and alignment.script_segment:
             segment = alignment.script_segment[:max_segment_chars].rstrip()
             text = (
                 f"{text}\n\n"
