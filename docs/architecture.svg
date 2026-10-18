@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 620" width="1400" height="620" role="img" aria-label="profAIssor 시스템 구성: React 프론트가 FastAPI 백엔드에 HTTP JSON으로 요청하고, 백엔드는 llm_client를 통해 OpenAI 또는 mock provider를 호출한다. 음성·지표·세션은 브라우저에서 처리한다." font-family="-apple-system,'Apple SD Gothic Neo','Noto Sans KR',Helvetica,Arial,sans-serif" font-size="13" fill="#1f2328">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f2328"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="620" fill="#ffffff"/>
+
+  <!-- 브라우저 -->
+  <rect x="30" y="150" width="240" height="120" rx="12" fill="#f6f8fa" stroke="#1f2328" stroke-width="2"/>
+  <text x="150" y="190" text-anchor="middle" font-size="20" font-weight="700">브라우저</text>
+  <text x="150" y="216" text-anchor="middle" fill="#57606a">React 18 · TypeScript · Vite</text>
+  <text x="150" y="238" text-anchor="middle" fill="#57606a">Netlify 정적 호스팅</text>
+
+  <rect x="30" y="290" width="240" height="64" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="46" y="316" font-weight="700">Web Speech API</text>
+  <text x="46" y="338" fill="#57606a">음성 답변 STT · 영어 모드</text>
+
+  <rect x="30" y="366" width="240" height="64" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="46" y="392" font-weight="700">localStorage</text>
+  <text x="46" y="414" fill="#57606a">세션 저장 · 추이 그래프</text>
+
+  <text x="30" y="462" fill="#57606a">발화 지표 · 예상 발표 시간 · 용어 보정은</text>
+  <text x="30" y="482" fill="#57606a">브라우저에서 계산</text>
+
+  <!-- 화살표 브라우저 → 백엔드 -->
+  <line x1="272" y1="210" x2="398" y2="210" stroke="#1f2328" stroke-width="2.5" marker-end="url(#arr)"/>
+  <text x="335" y="198" text-anchor="middle" fill="#57606a">HTTP JSON</text>
+  <text x="335" y="234" text-anchor="middle" fill="#57606a">매 요청에 대본 ·</text>
+  <text x="335" y="252" text-anchor="middle" fill="#57606a">슬라이드 · 대화 전체</text>
+
+  <!-- 백엔드 박스 -->
+  <rect x="400" y="30" width="640" height="560" rx="16" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+
+  <rect x="424" y="54" width="290" height="64" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="440" y="80" font-weight="700">Render</text>
+  <text x="440" y="102" fill="#57606a">컨테이너 1개 · GitHub 연동 배포</text>
+
+  <rect x="726" y="54" width="290" height="64" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="742" y="80" font-weight="700">무상태 · DB 없음</text>
+  <text x="742" y="102" fill="#57606a">로그인 없이 바로 사용 · 수평 확장 용이</text>
+
+  <rect x="424" y="134" width="592" height="64" rx="10" fill="#f6f8fa" stroke="#1f2328" stroke-width="2"/>
+  <text x="440" y="160" font-size="16" font-weight="700">FastAPI</text>
+  <text x="440" y="184" fill="#57606a">라우터 → 서비스 → 프롬프트 / LLM 3층 · Pydantic 요청 검증</text>
+
+  <rect x="424" y="214" width="184" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="516" y="244" text-anchor="middle" font-weight="700">slides</text>
+  <text x="516" y="266" text-anchor="middle" fill="#57606a">PPTX · PDF</text>
+  <text x="516" y="284" text-anchor="middle" fill="#57606a">텍스트 추출</text>
+
+  <rect x="628" y="214" width="184" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="720" y="244" text-anchor="middle" font-weight="700">question · evaluation</text>
+  <text x="720" y="266" text-anchor="middle" fill="#57606a">질문 생성 · 3축 평가</text>
+  <text x="720" y="284" text-anchor="middle" fill="#57606a">꼬리질문 · 재질문</text>
+
+  <rect x="832" y="214" width="184" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="924" y="244" text-anchor="middle" font-weight="700">report</text>
+  <text x="924" y="266" text-anchor="middle" fill="#57606a">답변별 교정 · 커버리지</text>
+  <text x="924" y="284" text-anchor="middle" fill="#57606a">키워드 폴백</text>
+
+  <rect x="424" y="314" width="286" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="567" y="344" text-anchor="middle" font-weight="700">llm_client</text>
+  <text x="567" y="366" text-anchor="middle" fill="#57606a">chat() · chat_json() 한 곳</text>
+  <text x="567" y="384" text-anchor="middle" fill="#57606a">provider · 모델은 환경변수</text>
+
+  <rect x="730" y="314" width="286" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="873" y="344" text-anchor="middle" font-weight="700">prompts · personas</text>
+  <text x="873" y="366" text-anchor="middle" fill="#57606a">원문 용어 보존 규칙</text>
+  <text x="873" y="384" text-anchor="middle" fill="#57606a">전공계열별 페르소나 단일 원본</text>
+
+  <rect x="424" y="414" width="592" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="720" y="444" text-anchor="middle" font-weight="700">material_context</text>
+  <text x="720" y="466" text-anchor="middle" fill="#57606a">대본 ↔ 슬라이드 코사인 정렬 · 관련 슬라이드만 컨텍스트로 · 16,000자 초과 시 압축</text>
+
+  <text x="424" y="536" fill="#57606a">요청마다</text>
+  <text x="424" y="560" font-size="14">프롬프트 빌드 → LLM 호출 → JSON 파싱 → 실패 시 결정론적 폴백</text>
+
+  <!-- 화살표 백엔드 → provider -->
+  <line x1="1042" y1="150" x2="1118" y2="150" stroke="#1f2328" stroke-width="2.5" marker-end="url(#arr)"/>
+  <text x="1080" y="128" text-anchor="middle" fill="#57606a" font-size="12">LLM_PROVIDER</text>
+  <line x1="1042" y1="300" x2="1118" y2="300" stroke="#1f2328" stroke-width="2.5" marker-end="url(#arr)"/>
+
+  <!-- 오른쪽 -->
+  <rect x="1120" y="100" width="250" height="100" rx="12" fill="#f6f8fa" stroke="#1f2328" stroke-width="2"/>
+  <text x="1136" y="130" font-size="16" font-weight="700">OpenAI · Gemini</text>
+  <text x="1136" y="154" fill="#57606a">GPT-4o-mini 기본</text>
+  <text x="1136" y="176" fill="#57606a">provider당 모델 하나</text>
+
+  <rect x="1120" y="250" width="250" height="100" rx="12" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="1136" y="280" font-size="16" font-weight="700">mock provider</text>
+  <text x="1136" y="304" fill="#57606a">프롬프트를 파싱해</text>
+  <text x="1136" y="326" fill="#57606a">키 없이 전 흐름 동작</text>
+
+  <rect x="1120" y="400" width="250" height="64" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="1136" y="426" font-weight="700">Netlify</text>
+  <text x="1136" y="448" fill="#57606a">프론트 배포 · 프론트 변경 시만 빌드</text>
+
+  <rect x="1120" y="480" width="250" height="64" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="1136" y="506" font-weight="700">GitHub</text>
+  <text x="1136" y="528" fill="#57606a">브랜치 = Step ID · PR 리뷰 후 머지</text>
+</svg>
